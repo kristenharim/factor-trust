@@ -20,6 +20,8 @@ engine.simulate:
 
     python3 calibration.py
 """
+import ast
+import hashlib
 import json
 from pathlib import Path
 
@@ -52,23 +54,42 @@ def engine_args(vols, prevs, idio):
     return a, (idio / 100) ** 2
 
 
+def engine_fingerprint():
+    """Identity of the engine's *computation*.
+
+    Hashes the AST, not the bytes: comments and formatting must not invalidate a
+    21-second cache build, but any change to what is actually computed must. A
+    stale sweep would otherwise sit on the page next to a fan from the new
+    engine, silently disagreeing with it."""
+    tree = ast.parse(Path(engine.__file__).read_text())
+    return hashlib.sha256(ast.dump(tree).encode()).hexdigest()[:12]
+
+
 def key(p, k, a, d2, dist):
     """Identity of a sweep. Rounded because these come from float widget math.
     n is absent on purpose: the sweep varies n itself, so the sidebar's n never
-    invalidates the cache."""
+    invalidates the cache. Fingerprint goes last so load() can ask 'right
+    calibration, wrong engine?' by comparing everything but the tail."""
     return [p, k, [round(float(x), 12) for x in a], round(float(d2), 12),
-            dist, list(SWEEP_GRID)]
+            dist, list(SWEEP_GRID), engine_fingerprint()]
 
 
 def load(p, k, a, d2, dist):
-    """The precomputed sweep for this calibration, or None to compute it live."""
+    """-> (sweep | None, "hit" | "custom" | "stale").
+
+    "stale" means this IS the default calibration but the cache was built by a
+    different engine, so it must not be served: fall through to the live path
+    and say so, loudly. Slow and honest beats fast and quietly wrong."""
     if not CACHE_PATH.exists():
-        return None
+        return None, "custom"
     want = key(p, k, a, d2, dist)
-    for entry in json.loads(CACHE_PATH.read_text())["entries"]:
+    entries = json.loads(CACHE_PATH.read_text())["entries"]
+    for entry in entries:
         if entry["key"] == want:
-            return entry["sweep"]
-    return None
+            return entry["sweep"], "hit"
+    if any(entry["key"][:-1] == want[:-1] for entry in entries):
+        return None, "stale"
+    return None, "custom"
 
 
 def _build():
@@ -82,12 +103,14 @@ def _build():
         entries.append({"key": key(DEFAULT_P, k, a, d2, DEFAULT_DIST), "sweep": sweep})
 
     CACHE_PATH.write_text(json.dumps(
-        {"reps": CACHED_REPS, "grid": SWEEP_GRID, "entries": entries}, indent=1))
+        {"reps": CACHED_REPS, "grid": SWEEP_GRID, "engine": engine_fingerprint(),
+         "entries": entries}, indent=1))
 
     # every precomputed entry must load back, or the app silently pays 7 minutes
     for k in range(1, MAX_K + 1):
         a, d2 = engine_args(DEFAULT_VOLS[:k], DEFAULT_PREVS[:k], DEFAULT_IDIO)
-        assert load(DEFAULT_P, k, a, d2, DEFAULT_DIST) is not None, f"k={k} does not load back"
+        sweep, state = load(DEFAULT_P, k, a, d2, DEFAULT_DIST)
+        assert state == "hit", f"k={k} loads back as {state!r}, not a hit"
     print(f"wrote {CACHE_PATH.name}: {CACHED_REPS} paths x {len(SWEEP_GRID)} points "
           f"x k=1..{MAX_K}  ({CACHE_PATH.stat().st_size / 1024:.1f} kB)")
 

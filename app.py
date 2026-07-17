@@ -7,7 +7,9 @@ from_spectrum) and draws what they return.
 
 Walkthrough: 14-Lab/working/factor-trust — Streamlit rebuild walkthrough.md
 """
+import hashlib
 import math
+from pathlib import Path
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -15,6 +17,13 @@ import pandas as pd
 
 import calibration
 import engine
+
+# st.cache_data keys on a function's args and its own body — NOT on engine.py.
+# Edit the engine and a warm cache serves the old payload: here that surfaced as
+# a KeyError, but a change to the *math* with the same keys would silently serve
+# stale numbers that still look authoritative, which for this tool is the worst
+# failure available. Tie the cache key to the engine's actual bytes.
+ENGINE_FINGERPRINT = hashlib.sha256(Path(engine.__file__).read_bytes()).hexdigest()[:12]
 
 # ------------------------------------------------------------------ page + theme
 st.set_page_config(page_title="factor-trust", layout="wide")
@@ -163,18 +172,18 @@ else:
 
 # ------------------------------------------------------------------ cached engine calls
 @st.cache_data(show_spinner="simulating…")
-def run_sim(p, n, k, a, d2, dist, reps):
+def run_sim(p, n, k, a, d2, dist, reps, engine_fp):
     return engine.simulate(p, n, k, list(a), d2, dist, 6, reps)
 
 
 @st.cache_data(show_spinner=False)
-def run_sweep(p, k, a, d2, dist, reps=SWEEP_REPS):
+def run_sweep(p, k, a, d2, dist, engine_fp, reps=SWEEP_REPS):
     """Precomputed for the paper calibration, live for anything else.
 
     Live is the slow path by a wide margin: eigendecomposition is O(n^3), so the
     n=252 point alone costs ~60x the n=63 one, and the free tier runs ~100-300x
     slower than a laptop. Progress-reported for exactly that reason."""
-    cached = calibration.load(p, k, list(a), d2, dist)
+    cached, _ = calibration.load(p, k, list(a), d2, dist)
     if cached is not None:
         return cached
     bar = st.progress(0.0, "sweeping…")
@@ -185,11 +194,60 @@ def run_sweep(p, k, a, d2, dist, reps=SWEEP_REPS):
     return sw
 
 
-r = run_sim(p, n, k, tuple(a), float(d2), dist_key, reps)
+r = run_sim(p, n, k, tuple(a), float(d2), dist_key, reps, ENGINE_FINGERPRINT)
 
 q = lambda pct, j: r["quantiles"][str(pct)][j]
 floor_of = lambda j: spectrum["floor_measured"][j] if spectrum else r["floor_plugin_median"][j]
 snr_of = lambda j: spectrum["snr"][j] if spectrum else r["snr"][j]
+sub_q = lambda lab, pct: r["subspace"][lab]["quantiles"][str(pct)]
+
+# A label is only a label if the estimator can hold onto it. Above this much
+# mutual confusion the named directions are not identified and only their span
+# is: at an exact tie PCA cannot separate two factors at all (any rotation
+# within the plane is an equally valid eigenbasis), and the per-factor angle
+# degrades to ~random while the span stays sharp.
+TIE_TOL = 0.05
+
+
+def tied_runs(confusion, k):
+    """Adjacent factors the estimator confuses with each other, merged into runs.
+
+    Adjacent only: eigenvalue ranking can only confuse neighbours."""
+    # max, not sum: a swap puts h_j on b_j+1 AND h_j+1 on b_j on the SAME path,
+    # so adding the two directions double-counts the paths that swapped.
+    mutual = [max(confusion[j][j + 1], confusion[j + 1][j]) for j in range(k - 1)]
+    runs = []
+    for j, m in enumerate(mutual):
+        if m <= TIE_TOL:
+            continue
+        if runs and runs[-1][-1] == j:
+            runs[-1] = runs[-1] + (j + 1,)
+        else:
+            runs.append((j, j + 1))
+    return runs, mutual
+
+
+ties, mutual_conf = tied_runs(r["confusion"], k)
+tied_idx = {j for g in ties for j in g}
+
+
+def headline_entries():
+    """Per factor, except that a tied run speaks once, as its span. Printing
+    'f2 44°' next to 'f3 50°' for two factors the estimator swaps 1 path in 15
+    is a bare scalar dressed as a measurement."""
+    out, j = [], 0
+    while j < k:
+        run = next((g for g in ties if g[0] == j), None)
+        if run:
+            lab = engine.group_label(run)
+            out.append((f"{lab} span", sub_q(lab, 0.9), FACTOR_COLORS[run[0]]))
+            j = run[-1] + 1
+        elif j in tied_idx:
+            j += 1
+        else:
+            out.append((f"f{j+1}", q(0.9, j), FACTOR_COLORS[j]))
+            j += 1
+    return out
 
 # ------------------------------------------------------------------ header + spec echo
 st.markdown(
@@ -203,8 +261,8 @@ st.markdown(
 # ------------------------------------------------------------------ headline
 st.markdown(
     '<div class="verdict"><span class="lbl">90% of runs<br>land within</span>'
-    + "".join(f'<span class="v" style="color:{FACTOR_COLORS[j]}">'
-              f'<u>f{j+1}</u>{q(0.9, j):.0f}°</span>' for j in range(k))
+    + "".join(f'<span class="v" style="color:{color}"><u>{lab}</u>{val:.0f}°</span>'
+              for lab, val, color in headline_entries())
     + "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ fan chart
@@ -281,13 +339,37 @@ df = pd.DataFrame([{
 # :g strips pandas' trailing zeros (12.6000 -> 12.6); df itself stays numeric for export
 st.table(df.set_index("factor").map(lambda v: f"{v:g}"))
 
+# The tie warning sits directly under the rows it disqualifies, not below the
+# consequence text — a reader who stops at the table must still see it.
+for run in ties:
+    lab = engine.group_label(run)
+    names = " and ".join(f"f{j+1}" for j in run)
+    worst = max(q(0.9, j) for j in run)
+    pair_conf = max(mutual_conf[j] for j in range(run[0], run[-1])) * 100
+    st.markdown(
+        f'<div class="note" style="margin:.5rem 0 0">'
+        f'<b style="color:#d98a3a">[tied] {names} are not separately identified.</b> '
+        f'The estimator swaps their labels on <b>{pair_conf:.1f}%</b> of paths, '
+        f'so the rows above describe directions it cannot reliably tell apart — at an exact '
+        f'tie those per-factor angles degrade toward a random direction while still printing '
+        f'as if they were measurements. What survives is their {len(run)}-D span, known to '
+        f'<b>{sub_q(lab, 0.9):.1f}°</b> at q90 against <b>{worst:.1f}°</b> for the worst '
+        f'named direction in it. <b>Hedge the span, not the named direction.</b>'
+        "</div>", unsafe_allow_html=True)
+
 st.markdown(
     '<div class="note">'
     + "<br>".join(
         f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> &nbsp; at q90 = '
         f'<b>{q(0.9, j):.1f}°</b>, a book neutralized on the <i>estimated</i> f{j+1} '
         f'direction still carries <b>≈{resid_var_pct(q(0.9, j)):.0f}%</b> of f{j+1} '
-        "directional variance." for j in range(k))
+        "directional variance." + (" <b>Not usable alone — see [tied] above.</b>"
+                                   if j in tied_idx else "") for j in range(k))
+    + "".join(
+        f'<br><span style="color:{FACTOR_COLORS[g[0]]}">{engine.group_label(g)}</span> &nbsp; '
+        f'at q90 = <b>{sub_q(engine.group_label(g), 0.9):.1f}°</b>, a book neutralized on the '
+        f'estimated <i>span</i> still carries <b>≈{resid_var_pct(sub_q(engine.group_label(g), 0.9)):.0f}%</b> '
+        "of the worst-case in-span factor variance." for g in ties)
     + "<br><br>Residual variance fraction = sin² of the angle, under an "
       "<b>idealized projection</b>: exact orthogonal neutralization on the estimated "
       "direction, no costs, no error in the hedge ratio itself. It is a restatement of "
@@ -309,25 +391,51 @@ rule("[3] required history")
 
 # Checked before the click so the cost is stated up front, not discovered after
 # four minutes of staring at a progress bar.
-sweep_precomputed = calibration.load(p, k, list(a), float(d2), dist_key) is not None
+_, sweep_state = calibration.load(p, k, list(a), float(d2), dist_key)
+sweep_precomputed = sweep_state == "hit"
 
-s1, s2, _ = st.columns([1.3, 1, 4])
+s0, s1, s2, _ = st.columns([1.2, 1.3, 1, 2.5])
+with s0:
+    # Nobody's mandate is written in degrees. Same target, stated as the
+    # consequence it actually governs: resid = sin²(angle), so angle = asin√resid.
+    target_unit = st.selectbox("target stated as", ["max residual variance %", "q90 angle °"])
 with s1:
-    target = int(st.number_input("target q90 (°)", min_value=1, max_value=89, value=20))
+    if target_unit.startswith("max residual"):
+        max_resid = st.number_input("q90 residual variance ≤ (%)", min_value=1, max_value=99,
+                                    value=20)
+        target = math.degrees(math.asin(math.sqrt(max_resid / 100)))
+    else:
+        target = float(st.number_input("target q90 (°)", min_value=1, max_value=89, value=20))
 with s2:
     st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
     go_sweep = st.button("run sweep", width="stretch")
 
-if not sweep_precomputed:
+if target_unit.startswith("max residual"):
+    st.markdown(
+        f'<div class="note" style="margin:-.2rem 0 .4rem">Retaining no more than '
+        f'<b>{max_resid}%</b> of a factor\'s directional variance after neutralizing on the '
+        f'estimated direction means <b>q90 ≤ {target:.1f}°</b> — the same target, in the '
+        "unit the mandate is actually written in."
+        "</div>", unsafe_allow_html=True)
+
+if sweep_state == "custom":
     st.markdown(
         '<div class="note" style="margin:-.2rem 0 .4rem"><b>Custom calibration.</b> '
         "Only the paper defaults are precomputed, so this one runs live: six "
         "eigendecomposition sweeps on a shared vCPU, which takes <b>several minutes</b> "
         "in the browser. It will report progress per grid point."
         "</div>", unsafe_allow_html=True)
+elif sweep_state == "stale":
+    st.markdown(
+        '<div class="note" style="margin:-.2rem 0 .4rem">'
+        '<b style="color:#d98a3a">Precomputed sweep is stale.</b> '
+        "It was built by a different engine than the one that produced the fan above, so "
+        "serving it would put two disagreeing results on one page. Falling through to the "
+        "live path (several minutes). Rebuild with <b>python3 calibration.py</b>."
+        "</div>", unsafe_allow_html=True)
 
 if go_sweep:
-    sw = run_sweep(p, k, tuple(a), float(d2), dist_key)
+    sw = run_sweep(p, k, tuple(a), float(d2), dist_key, ENGINE_FINGERPRINT)
 
     sweep_fig = go.Figure()
     for j in range(k):
@@ -338,7 +446,7 @@ if go_sweep:
             marker=dict(size=5, symbol="square"),
             hovertemplate=f"f{j+1} · n=%{{x}}<br>q90 %{{y:.1f}}°<extra></extra>"))
     sweep_fig.add_hline(y=target, line_dash="dot", line_width=1, line_color="#d98a3a",
-                        annotation_text=f"target {target}°", annotation_position="top right",
+                        annotation_text=f"target {target:.4g}°", annotation_position="top right",
                         annotation_font=dict(color="#d98a3a", size=11))
     sweep_fig.update_xaxes(title="observations n (days)", title_font=dict(size=11),
                            gridcolor="#161c23", zeroline=False, ticks="outside", ticklen=4,
@@ -375,7 +483,7 @@ if go_sweep:
             lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
                          f'&nbsp;<b style="color:#d98a3a; opacity:1">[fail]&nbsp; out of reach '
                          f'on a credible window</b> — even the observable floor at n = '
-                         f'{sw["n"][-1]} ({floor_j:.1f}°) exceeds your {target}° target. '
+                         f'{sw["n"][-1]} ({floor_j:.1f}°) exceeds your {target:.4g}° target. '
                          f'The floor keeps falling with n, so this is reachable only with more '
                          f'history than fixed loadings can credibly cover.')
         else:
@@ -418,6 +526,26 @@ per factor, reports it in degrees as 50/80/95% bands, and marks the observable f
 The two visual classes differ **in kind**: the orange floor tick is measured (or would be, from your
 eigenvalues); the blue fan is simulated. The gap between them is the non-identifiable rotation term.
 
+#### Tied factors: when a label stops being a label
+
+PCA orders factors by sample eigenvalue. When two eigenvalues are close, that ordering is not
+stable: the estimator hands you two directions but cannot reliably say which is which. At an *exact*
+tie it is not a precision problem but an identification one — any rotation within the shared plane is
+an equally valid eigenbasis, so the per-factor angle degrades toward a random direction while still
+printing as a number. In simulation, two strong but exactly-tied factors report ≈85° per-factor (no
+information) while their 2-D span is known to ≈27°.
+
+So when the estimator swaps two labels on more than 5% of paths, this app stops leading with their
+named directions and reports their **span** instead: the largest principal angle between the true and
+estimated subspaces, i.e. arccos of the smallest singular value of Bᵀ H. That quantity is invariant
+to eigenvector sign *and* to label swaps — the exact two ambiguities that corrupt the per-factor
+numbers — which is why it survives a tie when they do not. The per-factor rows stay visible, marked,
+because they are still what the estimator returned; they just cannot carry a hedge on their own.
+
+The `swap%` column is the raw trigger. Its floor is not reported: the per-factor floor ℓ/θⱼ is a
+per-direction quantity, and a defensible *subspace* floor needs the paper's Corollary 2 rather than a
+number invented here.
+
 #### What is exact, what is asymptotic, what is simulated
 
 | quantity | status |
@@ -454,11 +582,11 @@ Cross-checked against a full p-dimensional reference engine (agreement <0.5° at
 and against the paper's Figure 1; floors reproduce the closed form; simulated totals sit above the
 floor as the theorem requires. The footer re-runs the reference check live on the paper calibration.
 
-**What has not been done — and it is the load-bearing item:** the bands have never been tested
-against *realized* rotation on real equity panels. Until they are, every number here is internally
-consistent and externally unproven. Monte Carlo noise on the displayed quantiles is a run-to-run
-heuristic, not a derived interval; formal quantile CIs belong inside that validation study, since
-CIs on an unvalidated simulator are just narrower wrong bands.
+**External validity is not established.** The true loading direction is latent, so "realized
+rotation" cannot be observed directly on real equity panels; cross-window sample rotation also
+contains genuine loading drift and is not the fan's target. Every number here is therefore
+internally consistent and externally unproven. Monte Carlo noise on the displayed quantiles is a
+run-to-run heuristic, not a derived interval.
 
 **Defaults** are the paper's illustrative calibration (US equity, Bayraktar et al. 2014), not fitted
 to any current book.
