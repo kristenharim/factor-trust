@@ -1,10 +1,23 @@
 [theme]
 base = "dark"
-backgroundColor = "#0d1117"
-secondaryBackgroundColor = "#161b22"
-textColor = "#c9d1d9"
-primaryColor = "#e8703a"
-font = "monospace"
+backgroundColor = "#0b0e12"
+secondaryBackgroundColor = "#10141a"
+codeBackgroundColor = "#10141a"
+textColor = "#b6bfc9"
+primaryColor = "#d98a3a"
+linkColor = "#d98a3a"
+borderColor = "#222a33"
+dataframeBorderColor = "#222a33"
+dataframeHeaderBackgroundColor = "#10141a"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "none"
+buttonRadius = "none"
+font = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+baseFontSize = 14
+linkUnderline = false
+chartCategoricalColors = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc"]
 
 [server]
 runOnSave = true
