@@ -7,6 +7,8 @@ from_spectrum) and draws what they return.
 
 Walkthrough: 14-Lab/working/factor-trust — Streamlit rebuild walkthrough.md
 """
+import math
+
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
@@ -14,56 +16,137 @@ import pandas as pd
 import engine
 
 # ------------------------------------------------------------------ page + theme
-st.set_page_config(page_title="Factor Trust", layout="wide")
+st.set_page_config(page_title="factor-trust", layout="wide")
 
+# Most of the look lives in .streamlit/config.toml (mono font, square corners,
+# hairline borders). This only covers what the theme system can't reach.
 st.markdown("""
 <style>
   #MainMenu, footer, [data-testid="stDecoration"],
   [data-testid="stToolbar"], [data-testid="stAppDeployButton"] { display: none; }
-  .block-container { padding-top: 2.5rem; padding-bottom: 3rem; max-width: 1400px; }
-  [data-testid="stMetricValue"] { font-size: 1.9rem; font-variant-numeric: tabular-nums; }
-  [data-testid="stMetricLabel"] { text-transform: uppercase; letter-spacing: .08em; font-size: .7rem; opacity: .65; }
-  [data-testid="stSidebar"] { border-right: 1px solid #30363d; }
-  table, .stDataFrame { font-variant-numeric: tabular-nums; }
-  h1 { font-size: 1.35rem !important; font-weight: 600; letter-spacing: -.01em; }
-  h2, h3 { font-size: 1rem !important; text-transform: uppercase; letter-spacing: .06em; opacity: .8; }
+  /* stHeader is a 48.75px opaque bar at z-index 999990: it paints over the top of
+     the page, so content must clear it and it must not show as a band. */
+  [data-testid="stHeader"] { background: transparent; }
+  .block-container { padding-top: 4rem; padding-bottom: 4rem; max-width: 1180px; }
+
+  /* type-in fields, not spinner widgets */
+  [data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] { display: none; }
+  [data-testid="stSidebar"] label p { font-size: .78rem; opacity: .7; letter-spacing: .04em; }
+  [data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+
+  /* section rules: LABEL ───────────── */
+  .rule { display: flex; align-items: center; gap: .7rem; margin: 1.9rem 0 .7rem;
+          font-size: .68rem; text-transform: uppercase; letter-spacing: .14em; opacity: .45; }
+  .rule::after { content: ""; flex: 1; height: 1px; background: #222a33; }
+
+  /* header */
+  .hdr { display: flex; align-items: baseline; gap: .8rem; }
+  .hdr b { font-size: 1.05rem; font-weight: 700; letter-spacing: -.01em; color: #e6edf3; }
+  .hdr span { font-size: .75rem; opacity: .45; }
+  .spec { margin: .45rem 0 .2rem; padding: .35rem 0; font-size: .74rem; opacity: .5;
+          border-top: 1px solid #222a33; border-bottom: 1px solid #222a33; }
+  .spec i { font-style: normal; color: #e6edf3; opacity: .85; }
+
+  /* headline: one line, not three cards */
+  .verdict { display: flex; align-items: baseline; gap: 1.6rem; flex-wrap: wrap;
+             margin: 1.1rem 0 .2rem; }
+  .verdict .lbl { font-size: .68rem; text-transform: uppercase; letter-spacing: .12em; opacity: .45; }
+  .verdict .v { font-size: 1.5rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .verdict .v u { text-decoration: none; font-size: .7rem; opacity: .5; margin-right: .35rem; }
+
+  /* table reads as fixed-width tool output */
+  [data-testid="stTable"] table { border-collapse: collapse; }
+  [data-testid="stTable"] thead th { text-transform: uppercase; font-size: .66rem; font-weight: 500;
+                                     letter-spacing: .1em; opacity: .5; text-align: right;
+                                     border-bottom: 1px solid #2c3641; padding: .3rem .7rem; }
+  [data-testid="stTable"] td { text-align: right; font-variant-numeric: tabular-nums;
+                               padding: .28rem .7rem; border-bottom: 1px solid #161c23; }
+  [data-testid="stTable"] tbody th { text-align: left; opacity: .75; font-weight: 400;
+                                     padding: .28rem .7rem; border-bottom: 1px solid #161c23; }
+
+  /* max-width in rem, not ch: ch scales with this element's own small font-size,
+     which collapsed the column to ~427px. */
+  .note { font-size: .8rem; line-height: 1.55; opacity: .6; max-width: 54rem; }
+  .note b { color: #b6bfc9; font-weight: 500; opacity: .9; }
+  .note i { font-style: italic; opacity: .85; }
+
+  /* methodology prose: reference material, not a landing page — default h4 and
+     body sizes shout next to the .68rem section rules */
+  [data-testid="stExpander"] summary { font-size: .78rem; }
+  [data-testid="stExpander"] h4 { font-size: .7rem !important; text-transform: uppercase;
+                                  letter-spacing: .12em; opacity: .55; font-weight: 500;
+                                  margin: 1.8rem 0 .6rem; }
+  [data-testid="stExpander"] p, [data-testid="stExpander"] li { font-size: .8rem;
+                                  line-height: 1.55; max-width: 54rem; }
+  [data-testid="stExpander"] td, [data-testid="stExpander"] th { font-size: .74rem;
+                                  line-height: 1.45; }
+
+  /* chart legend: swatches shaped like the marks they stand for */
+  .sw { display: inline-block; vertical-align: middle; margin: 0 .35rem 0 0; }
+  .sw.tick { width: 2px; height: 11px; background: #d98a3a; }
+  .sw.dot { width: 0; height: 11px; border-left: 2px dotted #6b7683; }
+  .sw.band { width: 15px; height: 8px; background: #38465a; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Factor Trust — how much should you trust your PCA factors?")
-
-FACTOR_COLORS = ["#8ec0f5", "#34b38a", "#d9a53f", "#a793ec"]
+FACTOR_COLORS = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc"]
+BAND_COLORS = ["#1c242e", "#28323e", "#38465a"]   # 95 / 80 / 50 %
 DEFAULT_VOLS = [16.0, 8.0, 6.0, 5.0]      # paper Table 1, annualized %
 DEFAULT_PREVS = [1.25, 1.0, 1.0, 1.0]     # paper G_B diagonal
+REPO = "https://github.com/kristenharim/factor-trust"
+
+# 1mo … 1y of daily data. Stops at 252 by decision, not by cost: the model holds
+# loadings fixed forever, which nobody believes across two years, so a sweep out
+# to n=504 would answer the question by leaning on its least credible assumption
+# (practitioner playbook: "cap the sweep at a declared stationarity horizon").
+# It also keeps the sweep tractable on a shared vCPU — n=504 alone was 62% of the
+# old grid's O(n^3) cost and hung the deployed app past 3 minutes.
+SWEEP_GRID = [21, 42, 63, 126, 189, 252]
+SWEEP_REPS = 200   # ponytail: q90 here is a threshold read, not a precision one;
+                   # raise toward 1000 if a crossing lands ambiguously close.
+
+
+def resid_var_pct(angle_deg):
+    """Fraction of the factor's directional variance a book neutralized on the
+    ESTIMATED direction still carries: sin² of the angle to the true one."""
+    return math.sin(math.radians(angle_deg)) ** 2 * 100
+
+
+def rule(label):
+    st.markdown(f'<div class="rule">{label}</div>', unsafe_allow_html=True)
+
 
 # ------------------------------------------------------------------ sidebar
 with st.sidebar:
-    mode = st.radio("Input mode", ["Model calibration", "Sample spectrum"])
-    n = int(st.number_input("observations n", min_value=8, max_value=504, value=63))
-    p = int(st.number_input("assets p", min_value=20, max_value=100_000, value=3000, step=100))
-    k = int(st.number_input("factors k", min_value=1, max_value=4, value=3))
+    st.markdown('<div class="rule">input</div>', unsafe_allow_html=True)
+    mode = st.radio("mode", ["model calibration", "sample spectrum"], label_visibility="collapsed")
+    n = int(st.number_input("n · observations", min_value=8, max_value=504, value=63))
+    p = int(st.number_input("p · assets", min_value=20, max_value=100_000, value=3000, step=100))
+    k = int(st.number_input("k · factors", min_value=1, max_value=4, value=3))
     dist = st.selectbox("factor return distribution", ["Student-t (6 df)", "Normal"])
     reps = int(st.select_slider("simulations", options=[200, 400, 1000, 2000], value=400))
 
-    if mode == "Model calibration":
-        vols = [st.number_input(f"factor {j+1} vol %", value=DEFAULT_VOLS[j],
+    if mode == "model calibration":
+        st.markdown('<div class="rule">calibration</div>', unsafe_allow_html=True)
+        vols = [st.number_input(f"f{j+1} vol %", value=DEFAULT_VOLS[j],
                                 min_value=0.1, step=0.5) for j in range(k)]
-        prevs = [st.number_input(f"factor {j+1} prevalence", value=DEFAULT_PREVS[j],
+        prevs = [st.number_input(f"f{j+1} prevalence", value=DEFAULT_PREVS[j],
                                  min_value=0.05, step=0.05) for j in range(k)]
         idio = st.number_input("idiosyncratic vol %", value=40.0, min_value=1.0, step=1.0)
     else:
+        st.markdown('<div class="rule">spectrum</div>', unsafe_allow_html=True)
         eig_text = st.text_area(
-            "paste ALL n eigenvalues of your sample covariance (comma/space separated)",
+            "all n eigenvalues of your sample covariance",
             height=120,
             placeholder="0.034, 0.0088, 0.006, 0.0026, 0.0025, 0.0024, 0.0023, 0.0027")
-        st.caption("Used as a **spectrum-matched plug-in scenario**: implied SNRⱼ = θⱼ/ℓ − 1 "
-                   "calibrates the simulation. θ and ℓ carry sampling noise, so this is a "
-                   "scenario, not an inversion.")
+        st.caption("Spectrum-matched plug-in scenario: implied SNRⱼ = θⱼ/ℓ − 1 calibrates the "
+                   "simulation. θ and ℓ carry sampling noise, so this is a scenario, not an "
+                   "inversion.")
 
 dist_key = "t" if dist.startswith("Student") else "normal"
 
 # ------------------------------------------------------------------ inputs -> engine args
-if mode == "Model calibration":
+if mode == "model calibration":
     a = [(v / 100) ** 2 * c for v, c in zip(vols, prevs)]
     d2 = (idio / 100) ** 2
     spectrum = None
@@ -87,9 +170,16 @@ def run_sim(p, n, k, a, d2, dist, reps):
     return engine.simulate(p, n, k, list(a), d2, dist, 6, reps)
 
 
-@st.cache_data(show_spinner="sweeping…")
-def run_sweep(p, k, a, d2, dist, reps=250):
-    return engine.sweep_n(p, [21, 42, 63, 126, 189, 252, 378, 504], k, list(a), d2, dist, 6, reps)
+@st.cache_data(show_spinner=False)
+def run_sweep(p, k, a, d2, dist, reps=SWEEP_REPS):
+    """Progress-reported because this is the slow path: eigendecomposition is
+    O(n^3), so the n=252 point alone costs ~60x the n=63 one."""
+    bar = st.progress(0.0, "sweeping…")
+    sw = engine.sweep_n(
+        p, SWEEP_GRID, k, list(a), d2, dist, 6, reps,
+        on_point=lambda done, total, n: bar.progress(done / total, f"sweeping… n={n}"))
+    bar.empty()
+    return sw
 
 
 r = run_sim(p, n, k, tuple(a), float(d2), dist_key, reps)
@@ -98,130 +188,278 @@ q = lambda pct, j: r["quantiles"][str(pct)][j]
 floor_of = lambda j: spectrum["floor_measured"][j] if spectrum else r["floor_plugin_median"][j]
 snr_of = lambda j: spectrum["snr"][j] if spectrum else r["snr"][j]
 
-# ------------------------------------------------------------------ KPI cards
-cols = st.columns(k)
-for j in range(k):
-    with cols[j]:
-        st.metric(f"Factor {j+1}", f"< {q(0.9, j):.0f}° @ 90%")
-        st.caption(f"median {q(0.5, j):.1f}° · floor {floor_of(j):.1f}° · "
-                   f"SNR {snr_of(j):.1f} · swap {r['swap_rate'][j]*100:.1f}%")
+# ------------------------------------------------------------------ header + spec echo
+st.markdown(
+    '<div class="hdr"><b>factor-trust</b>'
+    '<span>angle error of PCA factors under your calibration</span></div>'
+    f'<div class="spec">n=<i>{n}</i> &nbsp; p=<i>{p}</i> &nbsp; k=<i>{k}</i> &nbsp; '
+    f'dist=<i>{dist_key}</i> &nbsp; reps=<i>{reps}</i> &nbsp; seed=<i>{r["seed"]}</i> &nbsp; '
+    f'src=<i>{"spectrum" if spectrum else "model"}</i></div>',
+    unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ headline
+st.markdown(
+    '<div class="verdict"><span class="lbl">90% of runs<br>land within</span>'
+    + "".join(f'<span class="v" style="color:{FACTOR_COLORS[j]}">'
+              f'<u>f{j+1}</u>{q(0.9, j):.0f}°</span>' for j in range(k))
+    + "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ fan chart
+rule("[1] error distribution")
+
 fig = go.Figure()
 for j in range(k):
     y = k - j
-    for lo, hi, width, color in [(0.025, 0.975, 8, "#1f3350"),
-                                 (0.10, 0.90, 16, "#2b4f7e"),
-                                 (0.25, 0.75, 24, "#3f76b8")]:
+    for (lo, hi), width, color in zip([(0.025, 0.975), (0.10, 0.90), (0.25, 0.75)],
+                                      [7, 15, 23], BAND_COLORS):
         fig.add_shape(type="line", x0=q(lo, j), x1=q(hi, j), y0=y, y1=y,
                       line=dict(color=color, width=width))
     fig.add_shape(type="line", x0=r["floor_asymptotic"][j], x1=r["floor_asymptotic"][j],
-                  y0=y - 0.25, y1=y + 0.25, line=dict(color="#77808d", width=1.6, dash="dash"))
-    fig.add_shape(type="line", x0=floor_of(j), x1=floor_of(j), y0=y - 0.25, y1=y + 0.25,
-                  line=dict(color="#e8703a", width=3))
+                  y0=y - 0.28, y1=y + 0.28, line=dict(color="#6b7683", width=1, dash="dot"))
+    fig.add_shape(type="line", x0=floor_of(j), x1=floor_of(j), y0=y - 0.28, y1=y + 0.28,
+                  line=dict(color="#d98a3a", width=2))
     fig.add_trace(go.Scatter(
         x=[q(0.5, j)], y=[y], mode="markers",
-        marker=dict(color="#9ecbf7", size=9, line=dict(color="#0d1117", width=2)),
-        hovertemplate=(f"<b>Factor {j+1}</b><br>median %{{x:.1f}}°<br>"
+        marker=dict(color=FACTOR_COLORS[j], size=8, symbol="line-ns",
+                    line=dict(color=FACTOR_COLORS[j], width=2.5)),
+        hovertemplate=(f"<b>f{j+1}</b><br>median %{{x:.1f}}°<br>"
                        f"50% band {q(0.25, j):.1f}–{q(0.75, j):.1f}°<br>"
                        f"80% band {q(0.10, j):.1f}–{q(0.90, j):.1f}°<br>"
                        f"95% band {q(0.025, j):.1f}–{q(0.975, j):.1f}°<br>"
                        f"floor {floor_of(j):.1f}°<extra></extra>")))
-    fig.add_annotation(xref="paper", x=0, y=y, text=f"Factor {j+1}", showarrow=False,
-                       xanchor="right", xshift=-10,
-                       font=dict(color=FACTOR_COLORS[j], size=13))
+    fig.add_annotation(xref="paper", x=0, y=y, text=f"f{j+1}", showarrow=False,
+                       xanchor="right", xshift=-8,
+                       font=dict(color=FACTOR_COLORS[j], size=12))
 
-fig.update_xaxes(range=[0, 90], title="angle between estimated and true factor direction (°)",
-                 gridcolor="#21262d", zeroline=False)
-fig.update_yaxes(showticklabels=False, range=[0.4, k + 0.6],
+fig.update_xaxes(range=[0, 90], dtick=15, title="angle between estimated and true direction (°)",
+                 title_font=dict(size=11), gridcolor="#161c23", zeroline=False,
+                 ticks="outside", ticklen=4, tickcolor="#2c3641", showline=True,
+                 linecolor="#2c3641", tickfont=dict(size=11))
+fig.update_yaxes(showticklabels=False, range=[0.45, k + 0.55],
                  gridcolor="rgba(0,0,0,0)", zeroline=False)
 fig.update_layout(
     template="plotly_dark",
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="monospace", size=12),
-    margin=dict(l=90, r=10, t=30, b=10),
-    height=90 * k + 90,
+    font=dict(family="JetBrains Mono, monospace", size=12, color="#b6bfc9"),
+    margin=dict(l=48, r=8, t=8, b=8),
+    height=62 * k + 80,
     showlegend=False,
 )
 st.plotly_chart(fig, width="stretch")
 
-st.caption(
-    "Orange tick = observable floor "
-    + ("(measured from YOUR eigenvalues). " if spectrum
-       else "(median plug-in asymptotic floor, simulated). ")
-    + "Dashed gray = asymptotic formula. Blue bands = 50/80/95% simulated outcomes under your "
-    "stated assumptions — a conditional Monte Carlo distribution, **not a confidence interval**. "
-    "The gap between the floor and the bands is the in-subspace rotation term, which is provably "
-    "not estimable from data alone."
-)
+st.markdown(
+    '<div class="note">'
+    '<span class="sw tick"></span>observable floor '
+    + ("(measured from your eigenvalues)" if spectrum else "(median plug-in, simulated)")
+    + '&nbsp;&nbsp;&nbsp; <span class="sw dot"></span>asymptotic formula'
+      '&nbsp;&nbsp;&nbsp; <span class="sw band"></span>50/80/95% of simulated runs'
+      "<br>Bands are a conditional Monte Carlo distribution under your stated assumptions, "
+    "<b>not a confidence interval</b>. The gap between floor and bands is the in-subspace "
+    "rotation term, which is provably not estimable from data alone."
+    "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ quantile table + export
+rule("[2] readout")
+
 df = pd.DataFrame([{
-    "factor": f"Factor {j+1}",
+    "factor": f"f{j+1}",
+    "snr": round(snr_of(j), 1),
     "floor°": round(floor_of(j), 1),
     "asym°": round(r["floor_asymptotic"][j], 1),
     "q50°": round(q(0.5, j), 1),
     "q80°": round(q(0.8, j), 1),
     "q90°": round(q(0.9, j), 1),
     "q95°": round(q(0.95, j), 1),
-    "swap_rate": r["swap_rate"][j],
+    "resid%@q90": round(resid_var_pct(q(0.9, j)), 0),
+    "swap%": round(r["swap_rate"][j] * 100, 1),
 } for j in range(k)])
 
-st.dataframe(df, hide_index=True, width="stretch")
+# :g strips pandas' trailing zeros (12.6000 -> 12.6); df itself stays numeric for export
+st.table(df.set_index("factor").map(lambda v: f"{v:g}"))
 
-c1, c2, _ = st.columns([1, 1, 4])
+st.markdown(
+    '<div class="note">'
+    + "<br>".join(
+        f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> &nbsp; at q90 = '
+        f'<b>{q(0.9, j):.1f}°</b>, a book neutralized on the <i>estimated</i> f{j+1} '
+        f'direction still carries <b>≈{resid_var_pct(q(0.9, j)):.0f}%</b> of f{j+1} '
+        "directional variance." for j in range(k))
+    + "<br><br>Residual variance fraction = sin² of the angle, under an "
+      "<b>idealized projection</b>: exact orthogonal neutralization on the estimated "
+      "direction, no costs, no error in the hedge ratio itself. It is a restatement of "
+      "the same conditional scenario in variance units, <b>not an independent "
+      "measurement</b> — and deliberately not basis points, which would require your "
+      "actual holdings and covariance."
+    "</div>", unsafe_allow_html=True)
+
+c1, c2, _ = st.columns([1, 1, 5])
 with c1:
-    st.download_button("Download CSV", df.to_csv(index=False), file_name="factor-trust.csv")
+    st.download_button("export csv", df.to_csv(index=False),
+                       file_name="factor-trust.csv", width="stretch")
 with c2:
-    st.download_button("Download JSON", pd.Series(r).to_json(), file_name="factor-trust.json")
+    st.download_button("export json", pd.Series(r).to_json(),
+                       file_name="factor-trust.json", width="stretch")
 
 # ------------------------------------------------------------------ required-history sweep
-st.subheader("Required history")
-target = int(st.number_input("target: q90 error ≤ (degrees)", min_value=1, max_value=89, value=20))
+rule("[3] required history")
 
-if st.button("Run sweep"):
+s1, s2, _ = st.columns([1.3, 1, 4])
+with s1:
+    target = int(st.number_input("target q90 (°)", min_value=1, max_value=89, value=20))
+with s2:
+    st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+    go_sweep = st.button("run sweep", width="stretch")
+
+if go_sweep:
     sw = run_sweep(p, k, tuple(a), float(d2), dist_key)
 
     sweep_fig = go.Figure()
     for j in range(k):
         sweep_fig.add_trace(go.Scatter(
             x=sw["n"], y=[row[j] for row in sw["q90"]],
-            mode="lines+markers", name=f"Factor {j+1}",
-            line=dict(color=FACTOR_COLORS[j], width=2),
-            hovertemplate=f"Factor {j+1} · n=%{{x}}<br>q90 %{{y:.1f}}°<extra></extra>"))
-    sweep_fig.add_hline(y=target, line_dash="dash", line_color="#e05d5d",
-                        annotation_text=f"target {target}°",
-                        annotation_font=dict(color="#e05d5d"))
-    sweep_fig.update_xaxes(title="observations n (days)", gridcolor="#21262d", zeroline=False)
-    sweep_fig.update_yaxes(title="q90 error (°)", range=[0, 90], gridcolor="#21262d", zeroline=False)
+            mode="lines+markers", name=f"f{j+1}",
+            line=dict(color=FACTOR_COLORS[j], width=1.6),
+            marker=dict(size=5, symbol="square"),
+            hovertemplate=f"f{j+1} · n=%{{x}}<br>q90 %{{y:.1f}}°<extra></extra>"))
+    sweep_fig.add_hline(y=target, line_dash="dot", line_width=1, line_color="#d98a3a",
+                        annotation_text=f"target {target}°", annotation_position="top right",
+                        annotation_font=dict(color="#d98a3a", size=11))
+    sweep_fig.update_xaxes(title="observations n (days)", title_font=dict(size=11),
+                           gridcolor="#161c23", zeroline=False, ticks="outside", ticklen=4,
+                           tickcolor="#2c3641", showline=True, linecolor="#2c3641",
+                           tickfont=dict(size=11))
+    sweep_fig.update_yaxes(title="q90 error (°)", title_font=dict(size=11), range=[0, 90],
+                           dtick=30, gridcolor="#161c23", zeroline=False, ticks="outside",
+                           ticklen=4, tickcolor="#2c3641", showline=True, linecolor="#2c3641",
+                           tickfont=dict(size=11))
     sweep_fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="monospace", size=12),
-        margin=dict(l=10, r=10, t=30, b=10),
-        height=340,
-        legend=dict(orientation="h", y=1.12, x=0, bgcolor="rgba(0,0,0,0)"),
+        font=dict(family="JetBrains Mono, monospace", size=12, color="#b6bfc9"),
+        margin=dict(l=8, r=8, t=28, b=8),
+        height=300,
+        legend=dict(orientation="h", y=1.16, x=0, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=11)),
     )
     st.plotly_chart(sweep_fig, width="stretch")
 
+    lines = []
     for j in range(k):
         hit = next((nn for nn, row in zip(sw["n"], sw["q90"]) if row[j] <= target), None)
         floor_j = sw["floor"][-1][j]
         if hit:
-            st.write(f"**Factor {j+1}:** reaches target at n ≥ {hit}")
+            lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
+                         f'&nbsp;[ ok ]&nbsp; target met at n ≥ <b>{hit}</b>')
         elif floor_j > target:
-            st.write(f"**Factor {j+1}:** ⚠️ unreachable at any n — the observable floor "
-                     f"({floor_j:.1f}°) already exceeds your target")
+            # Loudest element by design (playbook): it's the one output no persona
+            # attacked. NOT "unreachable at any n" — the floor arcsin√(δ²/(nλ+δ²))
+            # shrinks toward 0 as n grows, so that would be a false claim in the one
+            # place the tool is trusted most. What actually blocks it is stationarity.
+            lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
+                         f'&nbsp;<b style="color:#d98a3a; opacity:1">[fail]&nbsp; out of reach '
+                         f'on a credible window</b> — even the observable floor at n = '
+                         f'{sw["n"][-1]} ({floor_j:.1f}°) exceeds your {target}° target. '
+                         f'The floor keeps falling with n, so this is reachable only with more '
+                         f'history than fixed loadings can credibly cover.')
         else:
-            st.write(f"**Factor {j+1}:** not reached within the tested range (n ≤ {sw['n'][-1]})")
+            lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
+                         f'&nbsp;[ -- ]&nbsp; not reached by n = {sw["n"][-1]} — more history '
+                         f'only helps if loadings hold still that long')
+    st.markdown('<div class="note" style="opacity:.75">' + "<br>".join(lines) + "</div>",
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="note" style="margin-top:.7rem">The sweep stops at n = {SWEEP_GRID[-1]} '
+        "(one year) by choice, not by cost. The model holds loadings <b>fixed for the whole "
+        "window</b>, so sweeping to two or three years would answer “how much history do I need?” "
+        "using the assumption least likely to survive that long — the curve would keep dropping "
+        "and quietly promise precision that stationarity cannot deliver. Read a target unmet by "
+        f"n = {SWEEP_GRID[-1]} as a statement about <b>how long you can believe your own factor "
+        "model</b>, not as a request for more data."
+        f"<br>Sweep runs at {SWEEP_REPS} paths per point (lighter than the main fan), so treat a "
+        "crossing as a threshold, not a precise n."
+        "</div>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ methodology
+rule("[4] methodology & assumptions")
+
+with st.expander("What this computes, what it assumes, and where it is wrong"):
+    st.markdown(f"""
+**What it is.** A conditional simulator of PCA factor-direction error. Given (n, p, k), per-factor
+signal strengths and a factor-return distribution, it Monte-Carlos the finite-p error sin²∠(hⱼ, bⱼ)
+per factor, reports it in degrees as 50/80/95% bands, and marks the observable floor ℓ/θⱼ separately.
+
+**What it is not.**
+- **Not an estimator of total error from data alone.** The rotation component is provably not
+  estimable (Gurdogan–Shkolnik impossibility). The fan is *simulated under assumptions*.
+- **Not a confidence interval.** The bands are a conditional predictive distribution under an
+  assumed data-generating process. No amount of simulation fidelity changes this.
+- Not investment advice, and not a production risk tool.
+
+The two visual classes differ **in kind**: the orange floor tick is measured (or would be, from your
+eigenvalues); the blue fan is simulated. The gap between them is the non-identifiable rotation term.
+
+#### What is exact, what is asymptotic, what is simulated
+
+| quantity | status |
+|---|---|
+| sin²∠(hⱼ, bⱼ) per path | **exact finite-p draw** — no asymptotic shortcut |
+| floor tick, spectrum mode | exact arithmetic on your eigenvalues (its own sampling noise is **not** shown) |
+| floor tick, model mode | median of the simulated plug-in ℓ/θⱼ — an asymptotic floor, not a pathwise finite-p bound |
+| gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)), reference only |
+| fan quantiles | empirical quantiles of simulated paths, with Monte Carlo noise |
+
+Per path: Y = U·diag(√(pλ))·Φ + Z. The n×n dual Gram is simulated exactly without ever forming a
+p-dimensional array (Wishart via Bartlett when p−k ≥ n, direct Gaussian block otherwise), so cost is
+O(n³) and independent of p. Factors are matched by eigenvalue rank — the honest choice, since a
+practitioner cannot detect a swap either, but it fattens weak-factor tails. The `swap%` column
+reports how often it happened.
+
+#### Assumptions register
+
+| assumption | plausible violation | effect on the fan |
+|---|---|---|
+| random orthonormal true loadings | real sector/style structure | **largest external-validity gap**; direction configuration-dependent |
+| loadings fixed across time | drift / regime change | live markets add error the fan omits → **fan optimistic** |
+| iid observations | vol clustering, autocorrelation | effective n < nominal n → **fan optimistic** |
+| Gaussian idiosyncratic noise | fat-tailed specific returns | **untested hypothesis**, not a proven-safe step |
+| correct factor count k | ambiguous factor count in real markets | conflated factors; bias direction unclear |
+| prevalence enters as diag(G_B) | correlated loadings | vol²·prev is valid **only** when Σ_f and G_B share a diagonal basis |
+
+Two of the three "fan optimistic" rows are unmitigated. **The true error is more likely above these
+bands than below them.**
+
+#### Validation status
+
+Cross-checked against a full p-dimensional reference engine (agreement <0.5° at p=500 and p=3000)
+and against the paper's Figure 1; floors reproduce the closed form; simulated totals sit above the
+floor as the theorem requires. The footer re-runs the reference check live on the paper calibration.
+
+**What has not been done — and it is the load-bearing item:** the bands have never been tested
+against *realized* rotation on real equity panels. Until they are, every number here is internally
+consistent and externally unproven. Monte Carlo noise on the displayed quantiles is a run-to-run
+heuristic, not a derived interval; formal quantile CIs belong inside that validation study, since
+CIs on an unvalidated simulator are just narrower wrong bands.
+
+**Defaults** are the paper's illustrative calibration (US equity, Bayraktar et al. 2014), not fitted
+to any current book.
+
+[Source and full methodology register]({REPO})
+""")
 
 # ------------------------------------------------------------------ validation footer
-if mode == "Model calibration" and p == 3000 and n == 63 and k == 3 and dist_key == "t":
-    st.caption(
-        "Cross-checked against the reference engine at this exact calibration (n=63, p=3000, k=3, "
-        "Student-t): reference q50/q90 = 16.7°/19.8° (factor 1), 34.9°/46.4° (factor 2), "
-        "44.1°/51.6° (factor 3). This run: "
-        + ", ".join(f"{q(0.5, j):.1f}°/{q(0.9, j):.1f}°" for j in range(k)) + "."
-    )
+if mode == "model calibration" and p == 3000 and n == 63 and k == 3 and dist_key == "t":
+    rule("[5] validation")
+    st.markdown(
+        '<div class="note">Cross-checked against the reference engine at this exact calibration '
+        "(n=63, p=3000, k=3, Student-t).<br>reference q50/q90 &nbsp; 16.7°/19.8° · 34.9°/46.4° · "
+        "44.1°/51.6°<br>this run &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "
+        + " · ".join(f"{q(0.5, j):.1f}°/{q(0.9, j):.1f}°" for j in range(k))
+        + "</div>", unsafe_allow_html=True)
+
+st.markdown(
+    f'<div class="note" style="margin-top:2.5rem; padding-top:.8rem; '
+    f'border-top:1px solid #222a33">Prototype, not group-reviewed. '
+    f'Engine, methodology and assumption register: <a href="{REPO}">{REPO.split("//")[1]}</a>'
+    "</div>", unsafe_allow_html=True)

@@ -78,14 +78,21 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
     }
 
 
-def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED):
-    """q50/q90 total-error angle per factor across observation counts."""
+def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=None):
+    """q50/q90 total-error angle per factor across observation counts.
+
+    on_point(done, total, n) fires after each grid point. Cost is O(n^3) per
+    path, so the grid's largest n dominates the whole sweep — callers driving a
+    progress bar should expect wildly uneven step times.
+    """
     out = {"n": list(n_grid), "q50": [], "q90": [], "floor": []}
-    for n in n_grid:
+    for i, n in enumerate(out["n"]):
         r = simulate(p, int(n), k, a, d2, dist, dof, reps, seed)
         out["q50"].append(r["quantiles"]["0.5"])
         out["q90"].append(r["quantiles"]["0.9"])
         out["floor"].append(r["floor_asymptotic"])
+        if on_point:
+            on_point(i + 1, len(out["n"]), int(n))
     return out
 
 
@@ -125,5 +132,11 @@ if __name__ == "__main__":
             assert abs(g - w) < tol, f"q{qk}: {got} vs {want}"
     # small-p regime must not crash (p-k < n path)
     simulate(40, 63, 3, a, 0.16, "normal", reps=20)
+    # sweep reports every grid point, in order, exactly once (drives the app's progress bar)
+    seen = []
+    sw = sweep_n(200, [10, 12], 2, a[:2], 0.16, "normal", reps=5,
+                 on_point=lambda done, total, nn: seen.append((done, total, nn)))
+    assert seen == [(1, 2, 10), (2, 2, 12)], seen
+    assert sw["n"] == [10, 12] and len(sw["q90"]) == 2, sw["n"]
     print("engine self-check OK:", r["quantiles"]["0.5"], r["quantiles"]["0.9"],
           "swap:", r["swap_rate"])
