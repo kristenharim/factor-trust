@@ -19,6 +19,7 @@ Validated against pca_factor_trust.py (full p-dim engine) and the paper's
 Figure 1 calibration; see validate_lowdim.py one directory up.
 """
 import numpy as np
+from scipy.linalg import eigh
 
 SEED = 20260716
 QS = (0.025, 0.10, 0.25, 0.50, 0.75, 0.80, 0.90, 0.95, 0.975)
@@ -55,9 +56,11 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
     for r in range(reps):
         SE = scale * _phi(rng, k, n, dist, dof) + sd * rng.standard_normal((k, n))
         M = SE.T @ SE + _wishart(rng, n, p - k, d2)
-        vals, vecs = np.linalg.eigh(M)
-        top = np.argsort(vals)[::-1][:k]
-        tv, W = vals[top], vecs[:, top]
+        # Only the top k eigenpairs and the trace are ever used, so ask LAPACK for
+        # k of them instead of all n (~2x at n=252). Same eigenpairs, verified in
+        # the self-check below; ascending, so reverse to match the old argsort.
+        tv, W = eigh(M, subset_by_index=[n - k, n - 1], driver="evr")
+        tv, W = tv[::-1], W[:, ::-1]
         cosm = np.abs(SE @ W) / np.sqrt(tv)[None, :]      # cos(h_j, b_i) matrix (i,j)
         cjj = cosm[np.arange(k), np.arange(k)]
         sin2[r] = np.clip(1.0 - cjj**2, 0.0, 1.0)
