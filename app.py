@@ -207,11 +207,13 @@ floor_of = lambda j: spectrum["floor_measured"][j] if spectrum else r["floor_plu
 snr_of = lambda j: spectrum["snr"][j] if spectrum else r["snr"][j]
 sub_q = lambda lab, pct: r["subspace"][lab]["quantiles"][str(pct)]
 
-# A label is only a label if the estimator can hold onto it. Above this much
-# mutual confusion the named directions are not identified and only their span
-# is: at an exact tie PCA cannot separate two factors at all (any rotation
-# within the plane is an equally valid eigenbasis), and the per-factor angle
-# degrades to ~random while the span stays sharp.
+# Display cutoff, NOT a theorem-derived threshold: above this much mutual
+# confusion the tool leads with the span instead of the named rows. The proved
+# statement is only about the *exact* tie (any rotation within the plane is an
+# equally valid eigenbasis, so the directions are formally unidentified and only
+# the span invariant); a finite swap rate is an approach to that limit, not the
+# limit. Whether 5% is a principled cutoff is an open question for the group
+# (README §8) — keep this a heuristic, don't dress it as a result.
 TIE_TOL = 0.05
 
 
@@ -354,13 +356,16 @@ for run in ties:
     pair_conf = max(mutual_conf[j] for j in range(run[0], run[-1])) * 100
     st.markdown(
         f'<div class="note" style="margin:.5rem 0 0">'
-        f'<b style="color:#d98a3a">[tied] {names} are not separately identified.</b> '
-        f'The estimator swaps their labels on <b>{pair_conf:.1f}%</b> of paths, '
-        f'so the rows above describe directions it cannot reliably tell apart — at an exact '
-        f'tie those per-factor angles degrade toward a random direction while still printing '
-        f'as if they were measurements. What survives is their {len(run)}-D span, known to '
-        f'<b>{sub_q(lab, 0.9):.1f}°</b> at q90 against <b>{worst:.1f}°</b> for the worst '
-        f'named direction in it. <b>Hedge the span, not the named direction.</b>'
+        f'<b style="color:#d98a3a">[tied] {names} are hard to tell apart here.</b> '
+        f'The estimator swaps their labels on <b>{pair_conf:.1f}%</b> of simulated paths, so the '
+        f'individual rows above are unreliable as <i>named</i> directions. (In the limiting case '
+        f'of an <i>exact</i> eigenvalue tie they would be formally unidentified — any rotation '
+        f'within their plane is an equally valid eigenbasis — and only their span invariant; a '
+        f'swap rate this size is an approach to that limit, not the limit itself.) Their '
+        f'{len(run)}-D span is the part that stays put in simulation: '
+        f'<b>{sub_q(lab, 0.9):.1f}°</b> at q90 against <b>{worst:.1f}°</b> for the worst named '
+        f'direction in it. The 5% switch is a display heuristic and no span-level floor or '
+        f'required-history target is claimed — see [4] methodology.'
         "</div>", unsafe_allow_html=True)
 
 st.markdown(
@@ -369,7 +374,7 @@ st.markdown(
         f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> &nbsp; at q90 = '
         f'<b>{q(0.9, j):.1f}°</b>, a book neutralized on the <i>estimated</i> f{j+1} '
         f'direction still carries <b>≈{resid_var_pct(q(0.9, j)):.0f}%</b> of f{j+1} '
-        "directional variance." + (" <b>Not usable alone — see [tied] above.</b>"
+        "directional variance." + (" <b>Unreliable alone — see [tied] above.</b>"
                                    if j in tied_idx else "") for j in range(k))
     + "".join(
         f'<br><span style="color:{FACTOR_COLORS[g[0]]}">{engine.group_label(g)}</span> &nbsp; '
@@ -551,16 +556,23 @@ an equally valid eigenbasis, so the per-factor angle degrades toward a random di
 printing as a number. In simulation, two strong but exactly-tied factors report ≈85° per-factor (no
 information) while their 2-D span is known to ≈27°.
 
-So when the estimator swaps two labels on more than 5% of paths, this app stops leading with their
-named directions and reports their **span** instead: the largest principal angle between the true and
-estimated subspaces, i.e. arccos of the smallest singular value of Bᵀ H. That quantity is invariant
-to eigenvector sign *and* to label swaps — the exact two ambiguities that corrupt the per-factor
-numbers — which is why it survives a tie when they do not. The per-factor rows stay visible, marked,
-because they are still what the estimator returned; they just cannot carry a hedge on their own.
+So when the estimator swaps two labels on more than 5% of paths — **an arbitrary display cutoff, not
+a theorem-derived threshold** — this app stops leading with their named directions and reports their
+**span** instead: the largest principal angle between the true and estimated subspaces, i.e. arccos of
+the smallest singular value of Bᵀ H. That quantity is invariant to eigenvector sign *and* to label
+swaps — the exact two ambiguities that corrupt the per-factor numbers — which is why it survives a tie
+when they do not. The per-factor rows stay visible, marked, because they are still what the estimator
+returned; at this swap rate they are unreliable as individually named directions.
 
-The `swap%` column is the raw trigger. Its floor is not reported: the per-factor floor ℓ/θⱼ is a
-per-direction quantity, and a defensible *subspace* floor needs the paper's Corollary 2 rather than a
-number invented here.
+**Claim boundary.** *Established:* at an exact tie only the joint span is invariant, and the largest
+principal angle is what this engine simulates (checked against rotations of known size). *Not
+established:* that the paper's Corollary 2 supplies a floor for *this* statistic (a bound on a sum of
+subspace losses is not automatically a bound on the maximum principal angle), that 5% is a principled
+switch, or that the required-history "unreachable" logic extends to a span. The app therefore reports
+**no subspace floor, no span-level target test, and no theorem-derived threshold** — subspace mode is
+a conditional diagnostic and a limitation flag, not a new theorem-backed output. Resolving the
+theory-to-statistic mapping with the group is what those numbers would need first; until then, they
+remain future work.
 
 #### What is exact, what is asymptotic, what is simulated
 
