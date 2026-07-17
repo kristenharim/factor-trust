@@ -110,6 +110,12 @@ DEFAULT_PREVS = calibration.DEFAULT_PREVS  # paper G_B diagonal
 SWEEP_GRID = calibration.SWEEP_GRID
 SWEEP_REPS = calibration.LIVE_REPS
 
+# Rough slop on a simulated q90 at these path counts. A threshold crossing closer
+# than this to the target is not information. Deliberately a stated heuristic, not
+# a derived interval — real quantile CIs belong inside the validation study, since
+# a CI on an unvalidated simulator is just a narrower wrong band.
+MARGIN_NOISE_DEG = 1.0
+
 
 def resid_var_pct(angle_deg):
     """Fraction of the factor's directional variance a book neutralized on the
@@ -470,11 +476,21 @@ if go_sweep:
 
     lines = []
     for j in range(k):
-        hit = next((nn for nn, row in zip(sw["n"], sw["q90"]) if row[j] <= target), None)
+        hit_row = next(((nn, row) for nn, row in zip(sw["n"], sw["q90"]) if row[j] <= target), None)
+        hit = hit_row[0] if hit_row else None
         floor_j = sw["floor"][-1][j]
         if hit:
+            # A pass decided by less than the simulation's own noise is not a pass,
+            # it is a coin flip wearing an [ok]. The q90 of a few hundred/thousand
+            # paths carries roughly a degree of slop, so say when the margin is
+            # inside it rather than reporting the crossing as if it were exact.
+            margin = target - hit_row[1][j]
+            thin = margin < MARGIN_NOISE_DEG
             lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
-                         f'&nbsp;[ ok ]&nbsp; target met at n ≥ <b>{hit}</b>')
+                         f'&nbsp;[ ok ]&nbsp; target met at n ≥ <b>{hit}</b>'
+                         + (f' &nbsp;— but by only <b>{margin:.1f}°</b>, which is inside this '
+                            f'simulation\'s own noise. Treat it as "borderline", not "met".'
+                            if thin else ''))
         elif floor_j > target:
             # Loudest element by design (playbook): it's the one output no persona
             # attacked. NOT "unreachable at any n" — the floor arcsin√(δ²/(nλ+δ²))
