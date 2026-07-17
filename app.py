@@ -13,6 +13,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
+import calibration
 import engine
 
 # ------------------------------------------------------------------ page + theme
@@ -91,19 +92,14 @@ st.markdown("""
 
 FACTOR_COLORS = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc"]
 BAND_COLORS = ["#1c242e", "#28323e", "#38465a"]   # 95 / 80 / 50 %
-DEFAULT_VOLS = [16.0, 8.0, 6.0, 5.0]      # paper Table 1, annualized %
-DEFAULT_PREVS = [1.25, 1.0, 1.0, 1.0]     # paper G_B diagonal
 REPO = "https://github.com/kristenharim/factor-trust"
 
-# 1mo … 1y of daily data. Stops at 252 by decision, not by cost: the model holds
-# loadings fixed forever, which nobody believes across two years, so a sweep out
-# to n=504 would answer the question by leaning on its least credible assumption
-# (practitioner playbook: "cap the sweep at a declared stationarity horizon").
-# It also keeps the sweep tractable on a shared vCPU — n=504 alone was 62% of the
-# old grid's O(n^3) cost and hung the deployed app past 3 minutes.
-SWEEP_GRID = [21, 42, 63, 126, 189, 252]
-SWEEP_REPS = 200   # ponytail: q90 here is a threshold read, not a precision one;
-                   # raise toward 1000 if a crossing lands ambiguously close.
+# Calibration defaults, the sweep grid and the precomputed sweep all live in
+# calibration.py, which imports no streamlit so the cache builder can share them.
+DEFAULT_VOLS = calibration.DEFAULT_VOLS    # paper Table 1, annualized %
+DEFAULT_PREVS = calibration.DEFAULT_PREVS  # paper G_B diagonal
+SWEEP_GRID = calibration.SWEEP_GRID
+SWEEP_REPS = calibration.LIVE_REPS
 
 
 def resid_var_pct(angle_deg):
@@ -147,8 +143,9 @@ dist_key = "t" if dist.startswith("Student") else "normal"
 
 # ------------------------------------------------------------------ inputs -> engine args
 if mode == "model calibration":
-    a = [(v / 100) ** 2 * c for v, c in zip(vols, prevs)]
-    d2 = (idio / 100) ** 2
+    # via calibration so the app and the cache builder derive a/d2 identically —
+    # any drift here would silently miss the cache and cost minutes
+    a, d2 = calibration.engine_args(vols, prevs, idio)
     spectrum = None
 else:
     try:
@@ -172,8 +169,14 @@ def run_sim(p, n, k, a, d2, dist, reps):
 
 @st.cache_data(show_spinner=False)
 def run_sweep(p, k, a, d2, dist, reps=SWEEP_REPS):
-    """Progress-reported because this is the slow path: eigendecomposition is
-    O(n^3), so the n=252 point alone costs ~60x the n=63 one."""
+    """Precomputed for the paper calibration, live for anything else.
+
+    Live is the slow path by a wide margin: eigendecomposition is O(n^3), so the
+    n=252 point alone costs ~60x the n=63 one, and the free tier runs ~100-300x
+    slower than a laptop. Progress-reported for exactly that reason."""
+    cached = calibration.load(p, k, list(a), d2, dist)
+    if cached is not None:
+        return cached
     bar = st.progress(0.0, "sweeping…")
     sw = engine.sweep_n(
         p, SWEEP_GRID, k, list(a), d2, dist, 6, reps,
@@ -304,12 +307,24 @@ with c2:
 # ------------------------------------------------------------------ required-history sweep
 rule("[3] required history")
 
+# Checked before the click so the cost is stated up front, not discovered after
+# four minutes of staring at a progress bar.
+sweep_precomputed = calibration.load(p, k, list(a), float(d2), dist_key) is not None
+
 s1, s2, _ = st.columns([1.3, 1, 4])
 with s1:
     target = int(st.number_input("target q90 (°)", min_value=1, max_value=89, value=20))
 with s2:
     st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
     go_sweep = st.button("run sweep", width="stretch")
+
+if not sweep_precomputed:
+    st.markdown(
+        '<div class="note" style="margin:-.2rem 0 .4rem"><b>Custom calibration.</b> '
+        "Only the paper defaults are precomputed, so this one runs live: six "
+        "eigendecomposition sweeps on a shared vCPU, which takes <b>several minutes</b> "
+        "in the browser. It will report progress per grid point."
+        "</div>", unsafe_allow_html=True)
 
 if go_sweep:
     sw = run_sweep(p, k, tuple(a), float(d2), dist_key)
@@ -377,9 +392,12 @@ if go_sweep:
         "and quietly promise precision that stationarity cannot deliver. Read a target unmet by "
         f"n = {SWEEP_GRID[-1]} as a statement about <b>how long you can believe your own factor "
         "model</b>, not as a request for more data."
-        f"<br>Sweep runs at {SWEEP_REPS} paths per point (lighter than the main fan), so treat a "
-        "crossing as a threshold, not a precise n."
-        "</div>", unsafe_allow_html=True)
+        + (f"<br>Precomputed offline at {calibration.CACHED_REPS} paths per point, so this "
+           "curve is steadier than the fan above it."
+           if sweep_precomputed else
+           f"<br>Computed live at {SWEEP_REPS} paths per point (lighter than the main fan), so "
+           "treat a crossing as a threshold, not a precise n.")
+        + "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ methodology
 rule("[4] methodology & assumptions")
