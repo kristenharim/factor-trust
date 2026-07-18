@@ -1,5 +1,5 @@
 """
-Factor Trust — Streamlit frontend over the validated engine.
+Factor Trust: Streamlit frontend over the validated engine.
 
 engine.py is the source of numerical truth and is untouched by this file: this
 script only wires widgets to its three functions (simulate / sweep_n /
@@ -20,7 +20,7 @@ import calibration
 import engine
 import reporting
 
-# st.cache_data keys on a function's args and its own body — NOT on engine.py.
+# st.cache_data keys on a function's args and its own body, NOT on engine.py.
 # Edit the engine and a warm cache serves the old payload: here that surfaced as
 # a KeyError, but a change to the *math* with the same keys would silently serve
 # stale numbers that still look authoritative, which for this tool is the worst
@@ -179,8 +179,8 @@ dist_key = "t" if dist.startswith("Student") else "normal"
 
 # ------------------------------------------------------------------ inputs -> engine args
 if mode == "model calibration":
-    # via calibration so the app and the cache builder derive a/d2 identically —
-    # any drift here would silently miss the cache and cost minutes
+    # via calibration so the app and the cache builder derive a/d2 identically.
+    # Any drift here would silently miss the cache and cost minutes
     a, d2 = calibration.engine_args(vols, prevs, idio)
     spectrum = None
     spectrum_input = None
@@ -248,8 +248,8 @@ sub_q = lambda lab, pct: r["subspace"][lab]["quantiles"][str(pct)]
 # equally valid eigenbasis, so the directions are formally unidentified and only
 # the span invariant); a finite swap rate is an approach to that limit, not the
 # limit. Whether any given % is a principled cutoff is an open question for the
-# group (README §8) — user-adjustable in the sidebar precisely so it reads as a
-# policy knob, not a result.
+# group (README §8). It is user-adjustable in the sidebar precisely so it reads
+# as a policy knob, not a result.
 TIE_TOL = tie_cutoff_pct / 100
 ties, mutual_conf = reporting.tied_runs(r["confusion"], k, TIE_TOL)
 tied_idx = {j for g in ties for j in g}
@@ -386,7 +386,7 @@ st.caption("q90lo/q90hi = a 95% bootstrap interval, swaplo/swaphi = a 95% Wilson
            "interval is noise; raise the simulation count before trusting it.")
 
 # The tie warning sits directly under the rows it disqualifies, not below the
-# consequence text — a reader who stops at the table must still see it.
+# consequence text: a reader who stops at the table must still see it.
 for run in ties:
     lab = engine.group_label(run)
     names = " and ".join(f"f{j+1}" for j in run)

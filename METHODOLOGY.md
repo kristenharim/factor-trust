@@ -33,7 +33,7 @@ of p. See the `engine.py` module docstring for the exact construction.
 
 Estimated and true directions are matched by the one-to-one permutation that maximizes
 total absolute overlap; `swap%` is how often that assignment differs from the
-population-strength rank label. **That matching uses the true directions** — information
+population-strength rank label. **That matching uses the true directions**, information
 no practitioner has on real data. Simulated named-factor accuracy is therefore optimistic
 in a way the fan cannot show.
 
@@ -41,9 +41,9 @@ in a way the fan cannot show.
 
 | quantity | status |
 |---|---|
-| sin²∠(hⱼ, bⱼ) per path | exact finite-p draw — no asymptotic shortcut |
+| sin²∠(hⱼ, bⱼ) per path | exact finite-p draw, no asymptotic shortcut |
 | floor tick, spectrum mode | exact arithmetic on your eigenvalues (its own sampling noise is **not** shown) |
-| floor tick, model mode | median of the simulated plug-in ℓ/θⱼ — an asymptotic floor, not a pathwise finite-p bound |
+| floor tick, model mode | median of the simulated plug-in ℓ/θⱼ, an asymptotic floor, not a pathwise finite-p bound |
 | gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Student-t factor returns change the simulated fan only; the formula is not re-derived for heavy tails |
 | fan quantiles | empirical quantiles of simulated paths; q90 carries a 95% bootstrap interval for Monte Carlo estimation noise |
 | swap% | Monte Carlo rate with a 95% Wilson interval; both intervals quantify simulation noise only |
@@ -56,7 +56,7 @@ any rotation within the shared plane is an equally valid eigenbasis, so only the
 invariant.
 
 When the estimator swaps two labels on more than the tie cutoff (default 5%, adjustable
-in the app sidebar — **a display policy, not a theorem-derived threshold**), the app stops
+in the app sidebar, **a display policy, not a theorem-derived threshold**), the app stops
 leading with named directions and reports the **span**: the largest principal angle
 between the true and estimated subspaces, arccos of the smallest singular value of BᵀH.
 That statistic is invariant to eigenvector sign and to label swaps, which is exactly why

@@ -8,7 +8,7 @@ class ReportingTests(unittest.TestCase):
         lo, hi = reporting.wilson95(0.05, 400)
         self.assertLess(lo, 0.05)
         self.assertGreater(hi, 0.05)
-        # a rate near 5% at 400 paths is ~±2pt wide — the whole reason it is shown
+        # a rate near 5% at 400 paths is ~±2pt wide, the whole reason it is shown
         self.assertGreater(hi - lo, 0.03)
         # boundary rates must not escape [0, 1]
         lo0, _ = reporting.wilson95(0.0, 400)

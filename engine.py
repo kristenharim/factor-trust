@@ -1,5 +1,5 @@
 """
-Factor Trust engine — exact low-dimensional Monte Carlo for PCA direction error.
+Factor Trust engine: exact low-dimensional Monte Carlo for PCA direction error.
 
 Model: Y = U diag(sqrt(p*a)) Phi + Z, U orthonormal p x k, Z iid N(0, d2).
 Simulates the n x n dual Gram directly (no p-dimensional arrays):
@@ -159,7 +159,7 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
         # Principal angles between the true and estimated spans of each run:
         # arccos of the singular values of B_S^T H_S. Invariant to eigenvector
         # sign AND to label swaps (both are orthogonal factors that leave the
-        # singular values alone) — which is exactly why this survives a near-tie
+        # singular values alone), which is exactly why this survives a near-tie
         # when the per-factor numbers above do not. Cost is an SVD of a <=4x4,
         # nothing next to the n x n eigendecomposition.
         for g, ix in enumerate(idx):
@@ -181,7 +181,7 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
         "swap_rate": (swaps / reps).round(4).tolist(),
         "confusion": (conf / reps).round(4).tolist(),
         # largest principal angle between the true and estimated span of each
-        # contiguous factor run — the honest object when labels are unstable
+        # contiguous factor run, the honest object when labels are unstable
         "subspace": {group_label(S): {
             "quantiles": {str(q): round(float(np.quantile(sub_deg[:, g], q)), 2) for q in QS},
             "mean": round(float(sub_deg[:, g].mean()), 2),
@@ -194,7 +194,7 @@ def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     """q50/q90 total-error angle per factor across observation counts.
 
     on_point(done, total, n) fires after each grid point. Cost is O(n^3) per
-    path, so the grid's largest n dominates the whole sweep — callers driving a
+    path, so the grid's largest n dominates the whole sweep, and callers driving a
     progress bar should expect wildly uneven step times.
     """
     out = {"n": list(n_grid), "q50": [], "q90": [], "q90_mc95": [], "floor": []}

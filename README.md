@@ -16,7 +16,7 @@ Given a factor-model calibration or sample spectrum, Factor Trust reports:
 - required-history results for stable named factors, framed as a model-implied scenario;
 - Monte Carlo uncertainty on reported q90 values and swap rates (bootstrap and Wilson intervals).
 
-It is a challenge and decision-boundary instrument—not a production risk model or an estimator of latent realized error.
+It is a challenge and decision-boundary instrument, not a production risk model or an estimator of latent realized error.
 
 ## Claim boundary
 
@@ -34,7 +34,7 @@ The error fan and its quantiles are Monte Carlo outputs under the selected facto
 
 The q90 bootstrap interval and the swap-rate Wilson interval measure only numerical uncertainty from using finitely many simulation paths. Neither is a confidence interval for real-market error.
 
-Every output is also conditional on the calibration itself — which, in practice, is estimated from the same returns one would PCA. The tool cannot break that circularity; the sensitivity panel measures its first-order size.
+Every output is also conditional on the calibration itself, which in practice is estimated from the same returns one would PCA. The tool cannot break that circularity; the sensitivity panel measures its first-order size.
 
 ### Not identifiable
 
@@ -79,11 +79,11 @@ When adjacent factors exceed the tie cutoff (default 5%, adjustable in the sideb
 - named required-history decisions are withheld;
 - no span-level history decision is substituted.
 
-The cutoff is a display rule, not a theorem-derived threshold, and the swap rate is reported with its Monte Carlo interval so a verdict decided by less than the noise reads as noise. In simulation, estimated and true factors are matched by an overlap-maximizing assignment that uses the true directions — information unavailable on real data — so simulated named-factor accuracy is optimistic.
+The cutoff is a display rule, not a theorem-derived threshold, and the swap rate is reported with its Monte Carlo interval so a verdict decided by less than the noise reads as noise. In simulation, estimated and true factors are matched by an overlap-maximizing assignment that uses the true directions (information unavailable on real data), so simulated named-factor accuracy is optimistic.
 
 ## Methodology
 
-The full methodology and assumption register lives in [METHODOLOGY.md](METHODOLOGY.md) and in the app's `[5] methodology & assumptions` panel. Notably: PCA is on the sample covariance (not correlation) matrix, and the asymptotic tick is a p → ∞, fixed-n formula derived under Gaussian idiosyncratic noise — the Student-t option changes the simulated fan only.
+The full methodology and assumption register lives in [METHODOLOGY.md](METHODOLOGY.md) and in the app's `[5] methodology & assumptions` panel. Notably: PCA is on the sample covariance (not correlation) matrix, and the asymptotic tick is a p → ∞, fixed-n formula derived under Gaussian idiosyncratic noise. The Student-t option changes the simulated fan only.
 
 ## Tests
 
