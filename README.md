@@ -12,8 +12,9 @@ Given a factor-model calibration or sample spectrum, Factor Trust reports:
 - a conditional Monte Carlo distribution of total direction error;
 - the implied residual directional variance after an idealized hedge;
 - warnings when adjacent factor identities are unstable;
-- required-history results for stable named factors;
-- Monte Carlo uncertainty on reported q90 values.
+- a calibration-sensitivity panel: the envelope on q90 and floor when each input group is scaled ±10/15/20%, and whether the tie verdict itself flips;
+- required-history results for stable named factors, framed as a model-implied scenario;
+- Monte Carlo uncertainty on reported q90 values and swap rates (bootstrap and Wilson intervals).
 
 It is a challenge and decision-boundary instrument—not a production risk model or an estimator of latent realized error.
 
@@ -31,7 +32,9 @@ At finite `(n, p)`, this plug-in value has sampling noise. It is not a pathwise 
 
 The error fan and its quantiles are Monte Carlo outputs under the selected factor-return distribution and the model assumptions below.
 
-The q90 bootstrap interval measures only numerical uncertainty from using finitely many simulation paths. It is not a confidence interval for real-market error.
+The q90 bootstrap interval and the swap-rate Wilson interval measure only numerical uncertainty from using finitely many simulation paths. Neither is a confidence interval for real-market error.
+
+Every output is also conditional on the calibration itself — which, in practice, is estimated from the same returns one would PCA. The tool cannot break that circularity; the sensitivity panel measures its first-order size.
 
 ### Not identifiable
 
@@ -69,14 +72,31 @@ Spectrum mode is a plug-in scenario, not an inversion of the latent factor model
 
 A one-to-one overlap-maximizing assignment measures how often estimated factors exchange their population-strength rank labels.
 
-When adjacent factors exceed the 5% display heuristic:
+When adjacent factors exceed the tie cutoff (default 5%, adjustable in the sidebar):
 
 - their named rows are marked unreliable;
 - the headline emphasizes their joint span;
 - named required-history decisions are withheld;
 - no span-level history decision is substituted.
 
-The 5% threshold is a display rule, not a theorem-derived cutoff.
+The cutoff is a display rule, not a theorem-derived threshold, and the swap rate is reported with its Monte Carlo interval so a verdict decided by less than the noise reads as noise. In simulation, estimated and true factors are matched by an overlap-maximizing assignment that uses the true directions — information unavailable on real data — so simulated named-factor accuracy is optimistic.
+
+## Methodology
+
+The full methodology and assumption register lives in [METHODOLOGY.md](METHODOLOGY.md) and in the app's `[5] methodology & assumptions` panel. Notably: PCA is on the sample covariance (not correlation) matrix, and the asymptotic tick is a p → ∞, fixed-n formula derived under Gaussian idiosyncratic noise — the Student-t option changes the simulated fan only.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+python -B engine.py   # engine self-check
+```
+
+CI runs both on every push (`.github/workflows/test.yml`). Dependencies are pinned in `requirements.txt`; `runtime.txt` pins the Python version for Streamlit Cloud.
+
+## License and citation
+
+MIT ([LICENSE](LICENSE)). If you use this tool, cite it via [CITATION.cff](CITATION.cff).
 
 ## Running locally
 
@@ -85,3 +105,4 @@ python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 streamlit run app.py
+```

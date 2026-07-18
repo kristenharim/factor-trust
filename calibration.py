@@ -69,9 +69,16 @@ def key(p, k, a, d2, dist):
     """Identity of a sweep. Rounded because these come from float widget math.
     n is absent on purpose: the sweep varies n itself, so the sidebar's n never
     invalidates the cache. Fingerprint goes last so load() can ask 'right
-    calibration, wrong engine?' by comparing everything but the tail."""
+    calibration, wrong build?' by comparing everything but the tail."""
     return [p, k, [round(float(x), 12) for x in a], round(float(d2), 12),
-            dist, list(SWEEP_GRID), engine_fingerprint()]
+            dist, list(SWEEP_GRID), [CACHED_REPS, engine_fingerprint()]]
+
+
+def cache_fingerprint():
+    """Content identity for Streamlit's in-memory sweep cache."""
+    if not CACHE_PATH.exists():
+        return "missing"
+    return hashlib.sha256(CACHE_PATH.read_bytes()).hexdigest()[:12]
 
 
 def load(p, k, a, d2, dist):

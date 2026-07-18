@@ -8,6 +8,7 @@ from_spectrum) and draws what they return.
 Walkthrough: 14-Lab/working/factor-trust — Streamlit rebuild walkthrough.md
 """
 import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pandas as pd
 
 import calibration
 import engine
+import reporting
 
 # st.cache_data keys on a function's args and its own body — NOT on engine.py.
 # Edit the engine and a warm cache serves the old payload: here that surfaced as
@@ -109,12 +111,7 @@ DEFAULT_VOLS = calibration.DEFAULT_VOLS    # paper Table 1, annualized %
 DEFAULT_PREVS = calibration.DEFAULT_PREVS  # paper G_B diagonal
 SWEEP_GRID = calibration.SWEEP_GRID
 SWEEP_REPS = calibration.LIVE_REPS
-
-# Rough slop on a simulated q90 at these path counts. A threshold crossing closer
-# than this to the target is not information. Deliberately a stated heuristic, not
-# a derived interval — real quantile CIs belong inside the validation study, since
-# a CI on an unvalidated simulator is just a narrower wrong band.
-MARGIN_NOISE_DEG = 1.0
+SWEEP_FINGERPRINT = calibration.cache_fingerprint()
 
 
 def resid_var_pct(angle_deg):
@@ -136,6 +133,11 @@ with st.sidebar:
     k = int(st.number_input("k · factors", min_value=1, max_value=4, value=3))
     dist = st.selectbox("factor return distribution", ["Student-t (6 df)", "Normal"])
     reps = int(st.select_slider("simulations", options=[200, 400, 1000, 2000], value=400))
+    tie_cutoff_pct = st.number_input(
+        "tie cutoff · swap %", min_value=1.0, max_value=25.0, value=5.0, step=1.0,
+        help="Display policy, not a statistical test: above this label-swap rate the app "
+             "leads with the span instead of the named rows. At 400 paths a rate near 5% "
+             "carries ≈±2pt of Monte Carlo noise — the readout shows the interval.")
 
     if mode == "model calibration":
         st.markdown('<div class="rule">calibration</div>', unsafe_allow_html=True)
@@ -146,13 +148,32 @@ with st.sidebar:
         idio = st.number_input("idiosyncratic vol %", value=40.0, min_value=1.0, step=1.0)
     else:
         st.markdown('<div class="rule">spectrum</div>', unsafe_allow_html=True)
-        eig_text = st.text_area(
-            "all n eigenvalues of your sample covariance",
-            height=120,
-            placeholder="0.034, 0.0088, 0.006, 0.0026, 0.0025, 0.0024, 0.0023, 0.0027")
-        st.caption("Spectrum-matched plug-in scenario: implied SNRⱼ = θⱼ/ℓ − 1 calibrates the "
+        spectrum_entry = st.radio(
+            "spectrum entry",
+            ["complete spectrum", "top k + bulk summary"],
+            help="The bulk mean must use every non-factor eigenvalue, not a selected tail.")
+        if spectrum_entry == "complete spectrum":
+            eig_text = st.text_area(
+                f"exactly n={n} positive eigenvalues",
+                height=120,
+                placeholder="Paste the complete spectrum, in any order")
+            bulk_mean_input = None
+            bulk_count_input = None
+        else:
+            eig_text = st.text_area(
+                f"exactly k={k} top eigenvalues",
+                height=90,
+                placeholder="0.034, 0.0088, 0.006")
+            bulk_mean_input = st.number_input(
+                "bulk mean ℓ · mean of every remaining eigenvalue",
+                min_value=1e-12, value=0.0025, format="%.8f")
+            bulk_count_input = int(st.number_input(
+                "eigenvalues included in ℓ", min_value=1, max_value=max(1, n - k),
+                value=max(1, n - k), step=1))
+        st.caption("Eigenvalues of the sample covariance matrix (not correlation). "
+                   "Spectrum-matched plug-in scenario: implied SNRⱼ = θⱼ/ℓ − 1 calibrates the "
                    "simulation. θ and ℓ carry sampling noise, so this is a scenario, not an "
-                   "inversion.")
+                   "inversion. n must be the effective spectral dimension used by the PCA.")
 
 dist_key = "t" if dist.startswith("Student") else "normal"
 
@@ -162,6 +183,7 @@ if mode == "model calibration":
     # any drift here would silently miss the cache and cost minutes
     a, d2 = calibration.engine_args(vols, prevs, idio)
     spectrum = None
+    spectrum_input = None
 else:
     try:
         eigs = [float(x) for x in eig_text.replace(",", " ").split()]
@@ -169,11 +191,24 @@ else:
         st.error("Could not parse those eigenvalues — numbers separated by commas or spaces only.")
         st.stop()
     try:
-        spectrum = engine.from_spectrum(eigs, n, k)
+        spectrum = engine.from_spectrum(
+            eigs, n, k, bulk_mean=bulk_mean_input, bulk_count=bulk_count_input)
     except ValueError as e:
         st.error(str(e))
         st.stop()
     a, d2 = spectrum["a"], spectrum["d2"]
+    spectrum_input = {
+        "entry_mode": spectrum_entry,
+        "supplied_eigenvalues": eigs,
+        "bulk_mean_supplied": bulk_mean_input,
+        "bulk_count_supplied": bulk_count_input,
+    }
+
+try:
+    engine.validate_calibration(p, n, k, a, d2, reps)
+except ValueError as e:
+    st.error(str(e))
+    st.stop()
 
 
 # ------------------------------------------------------------------ cached engine calls
@@ -183,7 +218,7 @@ def run_sim(p, n, k, a, d2, dist, reps, engine_fp):
 
 
 @st.cache_data(show_spinner=False)
-def run_sweep(p, k, a, d2, dist, engine_fp, reps=SWEEP_REPS):
+def run_sweep(p, k, a, d2, dist, engine_fp, cache_fp, reps=SWEEP_REPS):
     """Precomputed for the paper calibration, live for anything else.
 
     Live is the slow path by a wide margin: eigendecomposition is O(n^3), so the
@@ -212,30 +247,11 @@ sub_q = lambda lab, pct: r["subspace"][lab]["quantiles"][str(pct)]
 # statement is only about the *exact* tie (any rotation within the plane is an
 # equally valid eigenbasis, so the directions are formally unidentified and only
 # the span invariant); a finite swap rate is an approach to that limit, not the
-# limit. Whether 5% is a principled cutoff is an open question for the group
-# (README §8) — keep this a heuristic, don't dress it as a result.
-TIE_TOL = 0.05
-
-
-def tied_runs(confusion, k):
-    """Adjacent factors the estimator confuses with each other, merged into runs.
-
-    Adjacent only: eigenvalue ranking can only confuse neighbours."""
-    # max, not sum: a swap puts h_j on b_j+1 AND h_j+1 on b_j on the SAME path,
-    # so adding the two directions double-counts the paths that swapped.
-    mutual = [max(confusion[j][j + 1], confusion[j + 1][j]) for j in range(k - 1)]
-    runs = []
-    for j, m in enumerate(mutual):
-        if m <= TIE_TOL:
-            continue
-        if runs and runs[-1][-1] == j:
-            runs[-1] = runs[-1] + (j + 1,)
-        else:
-            runs.append((j, j + 1))
-    return runs, mutual
-
-
-ties, mutual_conf = tied_runs(r["confusion"], k)
+# limit. Whether any given % is a principled cutoff is an open question for the
+# group (README §8) — user-adjustable in the sidebar precisely so it reads as a
+# policy knob, not a result.
+TIE_TOL = tie_cutoff_pct / 100
+ties, mutual_conf = reporting.tied_runs(r["confusion"], k, TIE_TOL)
 tied_idx = {j for g in ties for j in g}
 
 
@@ -266,12 +282,24 @@ st.markdown(
     f'src=<i>{"spectrum" if spectrum else "model"}</i></div>',
     unsafe_allow_html=True)
 
+if p < 10 * n:
+    st.warning(
+        f"High-dimensional scope warning: p/n = {p/n:.1f}. The floor result is a p → ∞, "
+        "fixed-n statement; 10× is a conservative UI guardrail, not a theorem threshold. "
+        "The finite-p simulation still runs, but do not present the asymptotic tick as settled.")
+
 # ------------------------------------------------------------------ headline
 st.markdown(
     '<div class="verdict"><span class="lbl">90% of runs<br>land within</span>'
     + "".join(f'<span class="v" style="color:{color}"><u>{lab}</u>{val:.0f}°</span>'
               for lab, val, color in headline_entries())
-    + "</div>", unsafe_allow_html=True)
+    + "</div>"
+    # The headline travels in screenshots; the conditionality must travel with it.
+    '<div class="note" style="margin:.15rem 0 0">of <i>simulated</i> runs under the '
+    'calibration above — a conditional Monte Carlo statement, not real-market confidence. '
+    'If these calibration numbers were estimated from the same returns you would PCA, '
+    'treat every figure on this page as optimistic (see [3]).</div>',
+    unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ fan chart
 rule("[1] error distribution")
@@ -324,13 +352,15 @@ st.markdown(
     + '&nbsp;&nbsp;&nbsp; <span class="sw dot"></span>asymptotic formula'
       '&nbsp;&nbsp;&nbsp; <span class="sw band"></span>50/80/95% of simulated runs'
       "<br>Bands are a conditional Monte Carlo distribution under your stated assumptions, "
-    "<b>not a confidence interval</b>. The gap between floor and bands is the in-subspace "
-    "rotation term, which is provably not estimable from data alone."
+    "<b>not a confidence interval</b>. Excess total error above the floor is influenced by "
+    "in-subspace rotation under the model; the visible distance in degrees is not an additive "
+    "decomposition of the theorem."
     "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ quantile table + export
 rule("[2] readout")
 
+swap_ci = [reporting.wilson95(r["swap_rate"][j], reps) for j in range(k)]
 df = pd.DataFrame([{
     "factor": f"f{j+1}",
     "snr": round(snr_of(j), 1),
@@ -339,13 +369,21 @@ df = pd.DataFrame([{
     "q50°": round(q(0.5, j), 1),
     "q80°": round(q(0.8, j), 1),
     "q90°": round(q(0.9, j), 1),
+    "q90lo°": round(r["q90_mc95"]["lower"][j], 1),
+    "q90hi°": round(r["q90_mc95"]["upper"][j], 1),
     "q95°": round(q(0.95, j), 1),
     "resid%@q90": round(resid_var_pct(q(0.9, j)), 0),
     "swap%": round(r["swap_rate"][j] * 100, 1),
+    "swaplo%": round(swap_ci[j][0] * 100, 1),
+    "swaphi%": round(swap_ci[j][1] * 100, 1),
 } for j in range(k)])
 
 # :g strips pandas' trailing zeros (12.6000 -> 12.6); df itself stays numeric for export
 st.table(df.set_index("factor").map(lambda v: f"{v:g}"))
+st.caption("q90lo/q90hi = a 95% bootstrap interval, swaplo/swaphi = a 95% Wilson interval — "
+           "both for Monte Carlo estimation noise only, not uncertainty about whether the "
+           "simulator describes real markets. A tie verdict decided by less than the swap "
+           "interval is noise; raise the simulation count before trusting it.")
 
 # The tie warning sits directly under the rows it disqualifies, not below the
 # consequence text — a reader who stops at the table must still see it.
@@ -353,19 +391,23 @@ for run in ties:
     lab = engine.group_label(run)
     names = " and ".join(f"f{j+1}" for j in run)
     worst = max(q(0.9, j) for j in run)
-    pair_conf = max(mutual_conf[j] for j in range(run[0], run[-1])) * 100
+    pair_conf = max(mutual_conf[j] for j in range(run[0], run[-1]))
+    conf_lo, conf_hi = reporting.wilson95(pair_conf, reps)
+    pair_conf *= 100
     st.markdown(
         f'<div class="note" style="margin:.5rem 0 0">'
         f'<b style="color:#d98a3a">[tied] {names} are hard to tell apart here.</b> '
-        f'The estimator swaps their labels on <b>{pair_conf:.1f}%</b> of simulated paths, so the '
+        f'The estimator swaps their labels on <b>{pair_conf:.1f}%</b> '
+        f'(95% MC interval {conf_lo * 100:.1f}–{conf_hi * 100:.1f}%) of simulated paths, so the '
         f'individual rows above are unreliable as <i>named</i> directions. (In the limiting case '
         f'of an <i>exact</i> eigenvalue tie they would be formally unidentified — any rotation '
         f'within their plane is an equally valid eigenbasis — and only their span invariant; a '
         f'swap rate this size is an approach to that limit, not the limit itself.) Their '
         f'{len(run)}-D span is the part that stays put in simulation: '
         f'<b>{sub_q(lab, 0.9):.1f}°</b> at q90 against <b>{worst:.1f}°</b> for the worst named '
-        f'direction in it. The 5% switch is a display heuristic and no span-level floor or '
-        f'required-history target is claimed — see [4] methodology.'
+        f'direction in it. The {tie_cutoff_pct:g}% switch is a display heuristic (adjustable in '
+        f'the sidebar) and no span-level floor or required-history target is claimed — see '
+        f'[5] methodology.'
         "</div>", unsafe_allow_html=True)
 
 st.markdown(
@@ -389,16 +431,126 @@ st.markdown(
       "actual holdings and covariance."
     "</div>", unsafe_allow_html=True)
 
+factor_exports = []
+for j, row in enumerate(df.to_dict(orient="records")):
+    group = next((engine.group_label(g) for g in ties if j in g), None)
+    factor_exports.append({
+        **row,
+        "named_reliable": j not in tied_idx,
+        "tie_group": group,
+        "q90_mc95_method": r["q90_mc95"]["method"],
+    })
+subspace_exports = [{
+    "name": engine.group_label(g),
+    "metric": "largest principal angle",
+    "q50°": sub_q(engine.group_label(g), 0.5),
+    "q90°": sub_q(engine.group_label(g), 0.9),
+    "floor°": None,
+    "required_history": None,
+    "claim_status": "conditional simulation; no theorem-backed floor or target",
+} for g in ties]
+export_payload = reporting.build_export_payload(
+    engine_fingerprint=ENGINE_FINGERPRINT,
+    inputs={
+        "n": n, "p": p, "k": k, "distribution": dist_key, "dof": 6,
+        "simulation_paths": reps, "seed": r["seed"],
+        "source": "spectrum" if spectrum else "model",
+        "ordered_strengths": list(a), "idiosyncratic_variance": float(d2),
+    },
+    factors=factor_exports,
+    subspaces=subspace_exports,
+    tie_groups=[engine.group_label(g) for g in ties],
+    spectrum=({**spectrum_input, **spectrum} if spectrum else None),
+    assumptions=[
+        "conditional latent-factor simulation",
+        "fixed loadings", "iid observations", "Gaussian idiosyncratic noise",
+        "random orthonormal loadings", "correct k",
+    ])
+export_df = pd.DataFrame(reporting.export_rows(export_payload))
+
 c1, c2, _ = st.columns([1, 1, 5])
 with c1:
-    st.download_button("export csv", df.to_csv(index=False),
+    st.download_button("export csv", export_df.to_csv(index=False),
                        file_name="factor-trust.csv", width="stretch")
 with c2:
-    st.download_button("export json", pd.Series(r).to_json(),
+    st.download_button("export json", json.dumps(export_payload, indent=2),
                        file_name="factor-trust.json", width="stretch")
 
+# ------------------------------------------------------------------ calibration sensitivity
+rule("[3] calibration sensitivity")
+
+if mode == "model calibration":
+    st.markdown(
+        '<div class="note" style="margin:0 0 .5rem">Every number above is conditional on the '
+        'sidebar calibration — inputs which, in practice, are <b>estimated from the same '
+        'returns you would PCA</b>, a circularity this tool cannot break for you. This panel '
+        'measures how far the headline moves when those inputs are wrong by a stated amount: '
+        'each scenario scales all factor vols, all prevalences, or the idiosyncratic vol '
+        'up or down together, re-simulates, and reports the envelope.</div>',
+        unsafe_allow_html=True)
+    sc0, sc1, _ = st.columns([1.2, 1, 3])
+    with sc0:
+        sens_pct = st.selectbox("input perturbation", ["±10%", "±15%", "±20%"], index=1)
+    with sc1:
+        st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+        go_sens = st.button("run sensitivity", width="stretch")
+
+    if go_sens:
+        delta = float(sens_pct.strip("±%")) / 100
+        # 6 extra simulations: cap the panel at 400 paths so a 2000-path main run
+        # doesn't turn one click into six of them.
+        sens_reps = min(reps, 400)
+        scenarios = []
+        for label, sv, sp_, si in [
+                (f"vols +{sens_pct[1:]}", 1 + delta, 1.0, 1.0),
+                (f"vols −{sens_pct[1:]}", 1 - delta, 1.0, 1.0),
+                (f"prevalence +{sens_pct[1:]}", 1.0, 1 + delta, 1.0),
+                (f"prevalence −{sens_pct[1:]}", 1.0, 1 - delta, 1.0),
+                (f"idio +{sens_pct[1:]}", 1.0, 1.0, 1 + delta),
+                (f"idio −{sens_pct[1:]}", 1.0, 1.0, 1 - delta)]:
+            a_s, d2_s = calibration.engine_args(
+                [v * sv for v in vols], [c * sp_ for c in prevs], idio * si)
+            r_s = run_sim(p, n, k, tuple(a_s), float(d2_s), dist_key, sens_reps,
+                          ENGINE_FINGERPRINT)
+            ties_s, _ = reporting.tied_runs(r_s["confusion"], k, TIE_TOL)
+            scenarios.append((label, r_s, ties_s))
+
+        base = run_sim(p, n, k, tuple(a), float(d2), dist_key, sens_reps, ENGINE_FINGERPRINT)
+        sens_df = pd.DataFrame([{
+            "factor": f"f{j+1}",
+            "q90°": round(base["quantiles"]["0.9"][j], 1),
+            "q90 min°": round(min(r_s["quantiles"]["0.9"][j] for _, r_s, _ in scenarios), 1),
+            "q90 max°": round(max(r_s["quantiles"]["0.9"][j] for _, r_s, _ in scenarios), 1),
+            "floor°": round(base["floor_asymptotic"][j], 1),
+            "floor min°": round(min(r_s["floor_asymptotic"][j] for _, r_s, _ in scenarios), 1),
+            "floor max°": round(max(r_s["floor_asymptotic"][j] for _, r_s, _ in scenarios), 1),
+        } for j in range(k)])
+        st.table(sens_df.set_index("factor").map(lambda v: f"{v:g}"))
+
+        base_ties, _ = reporting.tied_runs(base["confusion"], k, TIE_TOL)
+        flips = [lab for lab, _, ties_s in scenarios if ties_s != base_ties]
+        if flips:
+            st.markdown(
+                '<div class="note"><b style="color:#d98a3a">The tie verdict itself moves</b> '
+                f'under: {", ".join(flips)}. Which factors count as reliably named is not '
+                'robust to this much calibration error — read the named rows accordingly.'
+                "</div>", unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="note" style="margin-top:.5rem">Envelope across 6 one-at-a-time '
+            f'scenarios at {sens_reps} paths each (min/max of the scenario values; the '
+            f'columns at that base are the same-path baseline). One-at-a-time scaling is a '
+            f'first-order probe, not a joint error model — real calibration errors are '
+            f'correlated and can move the envelope further.</div>',
+            unsafe_allow_html=True)
+else:
+    st.markdown(
+        '<div class="note">Available in model-calibration mode. In spectrum mode the inputs '
+        'are your measured eigenvalues; their sampling noise is a different object than a '
+        'calibration scaling and is not yet quantified here (see [5] methodology).</div>',
+        unsafe_allow_html=True)
+
 # ------------------------------------------------------------------ required-history sweep
-rule("[3] required history")
+rule("[4] required history — a model-implied scenario")
 
 # Checked before the click so the cost is stated up front, not discovered after
 # four minutes of staring at a progress bar.
@@ -446,16 +598,26 @@ elif sweep_state == "stale":
         "</div>", unsafe_allow_html=True)
 
 if go_sweep:
-    sw = run_sweep(p, k, tuple(a), float(d2), dist_key, ENGINE_FINGERPRINT)
+    sw = run_sweep(
+        p, k, tuple(a), float(d2), dist_key, ENGINE_FINGERPRINT, SWEEP_FINGERPRINT)
 
     sweep_fig = go.Figure()
-    for j in range(k):
+    stable_factors = reporting.stable_factor_indices(k, ties)
+    for j in stable_factors:
+        q90_y = [row[j] for row in sw["q90"]]
+        q90_lo = [row["lower"][j] for row in sw["q90_mc95"]]
+        q90_hi = [row["upper"][j] for row in sw["q90_mc95"]]
         sweep_fig.add_trace(go.Scatter(
-            x=sw["n"], y=[row[j] for row in sw["q90"]],
+            x=sw["n"], y=q90_y,
             mode="lines+markers", name=f"f{j+1}",
             line=dict(color=FACTOR_COLORS[j], width=1.6),
             marker=dict(size=5, symbol="square"),
-            hovertemplate=f"f{j+1} · n=%{{x}}<br>q90 %{{y:.1f}}°<extra></extra>"))
+            error_y=dict(type="data", symmetric=False,
+                         array=[hi - y for hi, y in zip(q90_hi, q90_y)],
+                         arrayminus=[y - lo for y, lo in zip(q90_y, q90_lo)],
+                         color=FACTOR_COLORS[j], thickness=0.8, width=2),
+            hovertemplate=(f"f{j+1} · n=%{{x}}<br>q90 %{{y:.1f}}°"
+                           "<br>MC 95% interval shown by bars<extra></extra>")))
     sweep_fig.add_hline(y=target, line_dash="dot", line_width=1, line_color="#d98a3a",
                         annotation_text=f"target {target:.4g}°", annotation_position="top right",
                         annotation_font=dict(color="#d98a3a", size=11))
@@ -477,44 +639,56 @@ if go_sweep:
         legend=dict(orientation="h", y=1.16, x=0, bgcolor="rgba(0,0,0,0)",
                     font=dict(size=11)),
     )
-    st.plotly_chart(sweep_fig, width="stretch")
+    if stable_factors:
+        st.plotly_chart(sweep_fig, width="stretch")
 
     lines = []
-    for j in range(k):
-        hit_row = next(((nn, row) for nn, row in zip(sw["n"], sw["q90"]) if row[j] <= target), None)
-        hit = hit_row[0] if hit_row else None
+    for j in stable_factors:
+        points = list(zip(sw["n"], sw["q90"], sw["q90_mc95"]))
+        confirmed = next(((nn, row, ci) for nn, row, ci in points
+                          if ci["upper"][j] <= target), None)
+        point_hit = next(((nn, row, ci) for nn, row, ci in points
+                          if row[j] <= target), None)
         floor_j = sw["floor"][-1][j]
-        if hit:
-            # A pass decided by less than the simulation's own noise is not a pass,
-            # it is a coin flip wearing an [ok]. The q90 of a few hundred/thousand
-            # paths carries roughly a degree of slop, so say when the margin is
-            # inside it rather than reporting the crossing as if it were exact.
-            margin = target - hit_row[1][j]
-            thin = margin < MARGIN_NOISE_DEG
+        if confirmed:
+            hit, _, ci = confirmed
             lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
-                         f'&nbsp;[ ok ]&nbsp; target met at n ≥ <b>{hit}</b>'
-                         + (f' &nbsp;— but by only <b>{margin:.1f}°</b>, which is inside this '
-                            f'simulation\'s own noise. Treat it as "borderline", not "met".'
-                            if thin else ''))
+                         f'&nbsp;[ ok ]&nbsp; target met at n ≥ <b>{hit}</b> after accounting for '
+                         f'Monte Carlo q90 uncertainty (95% upper endpoint {ci["upper"][j]:.1f}°).')
+        elif point_hit:
+            hit, row, ci = point_hit
+            lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
+                         f'&nbsp;[borderline]&nbsp; point estimate crosses at n = <b>{hit}</b>, but '
+                         f'the 95% Monte Carlo interval ({ci["lower"][j]:.1f}–'
+                         f'{ci["upper"][j]:.1f}°) still crosses the target.')
         elif floor_j > target:
-            # Loudest element by design (playbook): it's the one output no persona
-            # attacked. NOT "unreachable at any n" — the floor arcsin√(δ²/(nλ+δ²))
-            # shrinks toward 0 as n grows, so that would be a false claim in the one
-            # place the tool is trusted most. What actually blocks it is stationarity.
             lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
-                         f'&nbsp;<b style="color:#d98a3a; opacity:1">[fail]&nbsp; out of reach '
-                         f'on a credible window</b> — even the observable floor at n = '
+                         f'&nbsp;<b style="color:#d98a3a; opacity:1">[conditional fail]&nbsp; not '
+                         f'supported on a credible window</b> — the limiting floor reference at n = '
                          f'{sw["n"][-1]} ({floor_j:.1f}°) exceeds your {target:.4g}° target. '
                          f'The floor keeps falling with n, so this is reachable only with more '
-                         f'history than fixed loadings can credibly cover.')
+                         f'history than fixed loadings can credibly cover. This is a scenario '
+                         f'conclusion, not a finite-p pathwise impossibility claim.')
         else:
             lines.append(f'<span style="color:{FACTOR_COLORS[j]}">f{j+1}</span> '
                          f'&nbsp;[ -- ]&nbsp; not reached by n = {sw["n"][-1]} — more history '
                          f'only helps if loadings hold still that long')
+    for group in ties:
+        names = engine.group_label(group)
+        lines.append(
+            f'<span style="color:{FACTOR_COLORS[group[0]]}">{names}</span> '
+            '&nbsp;[withheld]&nbsp; named-factor history decisions are suppressed because the '
+            'labels are unstable; no span-level history target has been derived.')
     st.markdown('<div class="note" style="opacity:.75">' + "<br>".join(lines) + "</div>",
                 unsafe_allow_html=True)
     st.markdown(
-        f'<div class="note" style="margin-top:.7rem">The sweep stops at n = {SWEEP_GRID[-1]} '
+        f'<div class="note" style="margin-top:.7rem">This is a <b>model-implied scenario</b>, '
+        "not a data requirement: the sweep holds this exact calibration fixed while n varies, "
+        "so it answers “at what n does the <i>simulated</i> q90 cross the target, if the "
+        "calibration is right and stays right.” It is not a guarantee that collecting that much "
+        "history achieves the target — and if the calibration was itself estimated from a "
+        "window of length n, the whole curve inherits that circularity. "
+        f"The sweep stops at n = {SWEEP_GRID[-1]} "
         "(one year) by choice, not by cost. The model holds loadings <b>fixed for the whole "
         "window</b>, so sweeping to two or three years would answer “how much history do I need?” "
         "using the assumption least likely to survive that long — the curve would keep dropping "
@@ -529,13 +703,16 @@ if go_sweep:
         + "</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ methodology
-rule("[4] methodology & assumptions")
+rule("[5] methodology & assumptions")
 
 with st.expander("What this computes, what it assumes, and where it is wrong"):
     st.markdown(f"""
 **What it is.** A conditional simulator of PCA factor-direction error. Given (n, p, k), per-factor
 signal strengths and a factor-return distribution, it Monte-Carlos the finite-p error sin²∠(hⱼ, bⱼ)
 per factor, reports it in degrees as 50/80/95% bands, and marks the observable floor ℓ/θⱼ separately.
+PCA here means eigenvectors of the sample **covariance** matrix (not the correlation matrix), and the
+"true direction" bⱼ is the corresponding population eigenvector of Σ — if your shop runs PCA on
+correlations, the two problems differ by a per-asset rescaling and these numbers do not transfer.
 
 **What it is not.**
 - **Not an estimator of total error from data alone.** The rotation component is provably not
@@ -545,7 +722,9 @@ per factor, reports it in degrees as 50/80/95% bands, and marks the observable f
 - Not investment advice, and not a production risk tool.
 
 The two visual classes differ **in kind**: the orange floor tick is measured (or would be, from your
-eigenvalues); the blue fan is simulated. The gap between them is the non-identifiable rotation term.
+eigenvalues); the blue fan is simulated. Excess error above the floor is influenced by the
+non-identifiable rotation term, but their visual separation in degrees is not the theorem's additive
+second term (the decomposition is additive on the sin² scale).
 
 #### Tied factors: when a label stops being a label
 
@@ -556,8 +735,9 @@ an equally valid eigenbasis, so the per-factor angle degrades toward a random di
 printing as a number. In simulation, two strong but exactly-tied factors report ≈85° per-factor (no
 information) while their 2-D span is known to ≈27°.
 
-So when the estimator swaps two labels on more than 5% of paths — **an arbitrary display cutoff, not
-a theorem-derived threshold** — this app stops leading with their named directions and reports their
+So when the estimator swaps two labels on more than {tie_cutoff_pct:g}% of paths — **an arbitrary
+display cutoff, adjustable in the sidebar, not a theorem-derived threshold** — this app stops leading
+with their named directions and reports their
 **span** instead: the largest principal angle between the true and estimated subspaces, i.e. arccos of
 the smallest singular value of Bᵀ H. That quantity is invariant to eigenvector sign *and* to label
 swaps — the exact two ambiguities that corrupt the per-factor numbers — which is why it survives a tie
@@ -581,14 +761,17 @@ remain future work.
 | sin²∠(hⱼ, bⱼ) per path | **exact finite-p draw** — no asymptotic shortcut |
 | floor tick, spectrum mode | exact arithmetic on your eigenvalues (its own sampling noise is **not** shown) |
 | floor tick, model mode | median of the simulated plug-in ℓ/θⱼ — an asymptotic floor, not a pathwise finite-p bound |
-| gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)), reference only |
-| fan quantiles | empirical quantiles of simulated paths, with Monte Carlo noise |
+| gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Selecting Student-t factor returns changes the simulated fan only — **the formula is not re-derived for heavy tails**, which is why it is a reference tick and not a bound |
+| fan quantiles | empirical quantiles of simulated paths; q90 includes a 95% bootstrap interval for Monte Carlo estimation noise |
 
 Per path: Y = U·diag(√(pλ))·Φ + Z. The n×n dual Gram is simulated exactly without ever forming a
 p-dimensional array (Wishart via Bartlett when p−k ≥ n, direct Gaussian block otherwise), so cost is
-O(n³) and independent of p. Factors are matched by eigenvalue rank — the honest choice, since a
-practitioner cannot detect a swap either, but it fattens weak-factor tails. The `swap%` column
-reports how often it happened.
+O(n³) and independent of p. Estimated and true directions are matched by the one-to-one permutation
+that maximizes total absolute overlap. The `swap%` column reports how often that assignment differs
+from the population-strength rank label. **That matching uses the true directions** — information no
+practitioner has on real data, where you would name factors by economic interpretation and could
+mislabel without knowing. Simulated named-factor accuracy is therefore optimistic in a way the fan
+cannot show.
 
 #### Assumptions register
 
@@ -613,8 +796,9 @@ floor as the theorem requires. The footer re-runs the reference check live on th
 **External validity is not established.** The true loading direction is latent, so "realized
 rotation" cannot be observed directly on real equity panels; cross-window sample rotation also
 contains genuine loading drift and is not the fan's target. Every number here is therefore
-internally consistent and externally unproven. Monte Carlo noise on the displayed quantiles is a
-run-to-run heuristic, not a derived interval.
+internally consistent and externally unproven. The displayed q90 Monte Carlo interval quantifies only
+numerical estimation noise from a finite number of simulated paths; it does not establish external
+validity or quantify sampling noise in the spectrum-derived floor.
 
 **Defaults** are the paper's illustrative calibration (US equity, Bayraktar et al. 2014), not fitted
 to any current book.
@@ -624,7 +808,7 @@ to any current book.
 
 # ------------------------------------------------------------------ validation footer
 if mode == "model calibration" and p == 3000 and n == 63 and k == 3 and dist_key == "t":
-    rule("[5] validation")
+    rule("[6] validation")
     st.markdown(
         '<div class="note">Cross-checked against the reference engine at this exact calibration '
         "(n=63, p=3000, k=3, Student-t).<br>reference q50/q90 &nbsp; 16.7°/19.8° · 34.9°/46.4° · "

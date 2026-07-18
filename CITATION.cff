@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this tool, please cite it as below."
+title: "Factor Trust: angle error of PCA factors under a stated calibration"
+type: software
+authors:
+  - family-names: Ho
+    given-names: Kristen
+version: 0.1.0
+date-released: 2026-07-17
+url: "https://pca-factor-trust.streamlit.app/"
+repository-code: "https://github.com/kristenharim/factor-trust"
+abstract: >-
+  A research prototype for examining how much confidence a practitioner should
+  place in PCA-estimated factor directions when the number of assets is large
+  relative to the number of observations. Conditional Monte Carlo simulator
+  with an observable asymptotic floor, near-tie/span handling, and explicit
+  claim boundaries. Not a production risk model; not investment advice.

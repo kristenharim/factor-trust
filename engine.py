@@ -11,13 +11,16 @@ Audit fixes (LLM council 2026-07-16, runtime/council/...4caebb31.md):
   - Wishart: Bartlett only when p-k >= n; otherwise sample the (p-k) x n
     Gaussian block directly (singular Wishart), so any p is handled correctly.
   - cos uses |.| explicitly.
-  - swap-rate tracked: fraction of paths where h_j is closer to some b_i, i != j.
+  - swap-rate tracked with a one-to-one overlap-maximizing assignment: fraction
+    of paths where h_j's assigned population label differs from rank j.
   - "a" = calibration signal strengths (inputs), distinct from the theorem's
     realized eigenvalues.
 
-Validated against pca_factor_trust.py (full p-dim engine) and the paper's
-Figure 1 calibration; see validate_lowdim.py one directory up.
+Validated against the historical full p-dimensional engine and the paper's
+Figure 1 calibration; the repository's tests and CI protect the current contract.
 """
+import itertools
+
 import numpy as np
 
 try:
@@ -27,6 +30,7 @@ except ImportError:      # numpy-only deployments (the vault's stdlib server)
 
 SEED = 20260716
 QS = (0.025, 0.10, 0.25, 0.50, 0.75, 0.80, 0.90, 0.95, 0.975)
+MC_BOOTSTRAP_REPS = 400
 
 
 def _phi(rng, k, n, dist, dof):
@@ -76,9 +80,58 @@ def group_label(S):
     return "+".join(f"f{j + 1}" for j in S)
 
 
+def validate_calibration(p, n, k, a, d2, reps=1):
+    """Validate the ordered population-strength contract used by the engine.
+
+    Factor j is a rank label, so strengths must be supplied from strongest to
+    weakest. Equal adjacent strengths are allowed: they are the exact-tie case
+    where individual population directions cease to be uniquely identified.
+    """
+    a = np.asarray(a, dtype=float)
+    if not (isinstance(p, (int, np.integer)) and p >= k >= 1):
+        raise ValueError("require integer dimensions p >= k >= 1")
+    if not (isinstance(n, (int, np.integer)) and n > k):
+        raise ValueError("require integer observation count n > k")
+    if len(a) != k or not np.all(np.isfinite(a)) or np.any(a <= 0):
+        raise ValueError(f"need {k} finite, positive factor strengths")
+    if np.any(a[:-1] < a[1:]):
+        raise ValueError(
+            "factor strengths must be ordered strongest to weakest "
+            "(vol² × prevalence must be non-increasing); equal values are allowed ties")
+    if not np.isfinite(d2) or d2 <= 0:
+        raise ValueError("idiosyncratic variance must be finite and positive")
+    if not (isinstance(reps, (int, np.integer)) and reps >= 1):
+        raise ValueError("simulation paths must be a positive integer")
+    return a
+
+
+def _best_permutation(cosm):
+    """One-to-one true-factor assignment maximizing total absolute overlap."""
+    k = cosm.shape[0]
+    return np.asarray(max(
+        itertools.permutations(range(k)),
+        key=lambda perm: sum(cosm[perm[j], j] for j in range(k))), dtype=int)
+
+
+def _q90_mc_interval(angles, seed, bootstrap_reps=MC_BOOTSTRAP_REPS):
+    """Deterministic percentile-bootstrap interval for Monte Carlo q90 noise."""
+    reps = angles.shape[0]
+    rng = np.random.default_rng(seed ^ 0x5A17C0DE)
+    take = rng.integers(0, reps, size=(bootstrap_reps, reps))
+    boot = np.quantile(angles[take], 0.90, axis=1)
+    lo, hi = np.quantile(boot, [0.025, 0.975], axis=0)
+    return {
+        "lower": lo.round(2).tolist(),
+        "upper": hi.round(2).tolist(),
+        "confidence": 0.95,
+        "method": "percentile bootstrap over Monte Carlo paths",
+        "bootstrap_reps": bootstrap_reps,
+    }
+
+
 def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
     """Monte Carlo the finite-p error. a = per-factor signal strengths (k,)."""
-    a = np.asarray(a, dtype=float)
+    a = validate_calibration(p, n, k, a, d2, reps)
     rng = np.random.default_rng(seed)
     sin2 = np.empty((reps, k))
     obs = np.empty((reps, k))
@@ -100,7 +153,7 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
         cosm = np.abs(G)                                  # cos(h_j, b_i) matrix (i,j)
         cjj = cosm[np.arange(k), np.arange(k)]
         sin2[r] = np.clip(1.0 - cjj**2, 0.0, 1.0)
-        best = np.argmax(cosm, axis=0)
+        best = _best_permutation(cosm)
         swaps += (best != np.arange(k))
         conf[best, np.arange(k)] += 1
         # Principal angles between the true and estimated spans of each run:
@@ -124,6 +177,7 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
         "floor_plugin_median": deg(np.median(obs, axis=0)).round(2).tolist(),
         "floor_asymptotic": deg(d2 / (n * a + d2)).round(2).tolist(),
         "snr": (n * a / d2).round(2).tolist(),
+        "q90_mc95": _q90_mc_interval(ang, seed),
         "swap_rate": (swaps / reps).round(4).tolist(),
         "confusion": (conf / reps).round(4).tolist(),
         # largest principal angle between the true and estimated span of each
@@ -143,26 +197,47 @@ def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     path, so the grid's largest n dominates the whole sweep — callers driving a
     progress bar should expect wildly uneven step times.
     """
-    out = {"n": list(n_grid), "q50": [], "q90": [], "floor": []}
+    out = {"n": list(n_grid), "q50": [], "q90": [], "q90_mc95": [], "floor": []}
     for i, n in enumerate(out["n"]):
         r = simulate(p, int(n), k, a, d2, dist, dof, reps, seed)
         out["q50"].append(r["quantiles"]["0.5"])
         out["q90"].append(r["quantiles"]["0.9"])
+        out["q90_mc95"].append(r["q90_mc95"])
         out["floor"].append(r["floor_asymptotic"])
         if on_point:
             on_point(i + 1, len(out["n"]), int(n))
     return out
 
 
-def from_spectrum(eigs, n, k):
+def from_spectrum(eigs, n, k, bulk_mean=None, bulk_count=None):
     """Spectrum-matched plug-in calibration (NOT an exact inversion: theta and
     ell carry sampling noise; different models can share a spectrum).
     Returns implied per-factor strengths with d2 normalized to 1, plus the
     directly-measured plug-in floors."""
-    e = np.sort(np.asarray([x for x in eigs if x > 0], dtype=float))[::-1]
-    if len(e) < k + 2:
-        raise ValueError(f"need at least k+2={k+2} positive eigenvalues, got {len(e)}")
-    theta, ell = e[:k], e[k:].mean()
+    raw = np.asarray(eigs, dtype=float)
+    if raw.ndim != 1 or not np.all(np.isfinite(raw)) or np.any(raw <= 0):
+        raise ValueError("eigenvalues must all be finite and strictly positive")
+    if bulk_mean is None:
+        if len(raw) != n:
+            raise ValueError(
+                f"complete-spectrum mode requires exactly n={n} positive eigenvalues; "
+                f"got {len(raw)}. Use the explicit bulk-summary mode for θ₁…θₖ plus ℓ.")
+        e = np.sort(raw)[::-1]
+        theta, bulk = e[:k], e[k:]
+        ell, bulk_count = float(bulk.mean()), len(bulk)
+        source = "complete spectrum"
+    else:
+        if len(raw) != k:
+            raise ValueError(f"bulk-summary mode requires exactly k={k} top eigenvalues")
+        theta = np.sort(raw)[::-1]
+        ell = float(bulk_mean)
+        if not np.isfinite(ell) or ell <= 0:
+            raise ValueError("bulk mean ℓ must be finite and strictly positive")
+        if bulk_count != n - k:
+            raise ValueError(
+                f"bulk count must be n-k={n-k}; got {bulk_count}. "
+                "Use the mean of every remaining eigenvalue, not a selected tail.")
+        source = "top-k plus explicit bulk summary"
     if theta[-1] <= ell:
         raise ValueError(
             f"top-{k} eigenvalue ({theta[-1]:.4g}) is not above the bulk average "
@@ -174,6 +249,7 @@ def from_spectrum(eigs, n, k):
         "snr": snr.round(2).tolist(),
         "floor_measured": [round(deg(ell / t), 2) for t in theta],
         "theta": theta.tolist(), "ell": float(ell),
+        "bulk_count": int(bulk_count), "spectrum_source": source,
     }
 
 
@@ -201,7 +277,8 @@ if __name__ == "__main__":
     globals()["_sp_eigh"] = _sp
     assert np.allclose(tv_a, tv_b), (tv_a, tv_b)
     assert np.allclose(np.abs((W_a * W_b).sum(axis=0)), 1.0), "eigenvectors disagree"
-    assert _sp_eigh is not None, "scipy path should be live here"
+    if _sp is not None:
+        assert _sp_eigh is not None, "scipy path should be restored when installed"
 
     # --- subspace geometry -------------------------------------------------
     assert groups(3) == [(0, 1), (0, 1, 2), (1, 2)], groups(3)
@@ -217,7 +294,7 @@ if __name__ == "__main__":
     # hit" (atol covers the 4dp rounding on the way out, not real slack)
     conf = np.array(r["confusion"])
     assert np.allclose(conf.sum(axis=0), 1.0, atol=2e-4), conf
-    # its off-diagonal mass is the swap rate, by construction
+    # its off-diagonal mass is the one-to-one label mismatch rate, by construction
     assert np.allclose(1.0 - np.diag(conf), r["swap_rate"], atol=2e-4)
     # principal angles must be recovered exactly for a rotation of known size
     rng_t = np.random.default_rng(11)
