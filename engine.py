@@ -290,8 +290,13 @@ def sweep_p(p_grid, n, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     so a point at one p is related to but not a continuation of the point at the
     next. Draw them unjoined.
     """
+    # Validate here rather than reading the raw argument: simulate() computes its
+    # numbers from the validated array, so a floor line built from the raw one
+    # would silently drift from the curves it is drawn against, and "the curves
+    # flatten onto the floor" is this panel's entire claim.
+    a = validate_calibration(p_grid[0], n, k, a, d2, reps)
     out = {"p": list(p_grid), "q10": [], "q50": [], "q90": [], "paths": [],
-           "floor": deg_of(d2 / (n * np.asarray(a, dtype=float) + d2))}
+           "floor": deg_of(d2 / (n * a + d2))}
     for i, pp in enumerate(out["p"]):
         r = simulate(int(pp), n, k, a, d2, dist, dof, reps, seed,
                      return_paths=bool(keep_paths))
@@ -435,14 +440,19 @@ if __name__ == "__main__":
     print("  pathwise gap:", (meas - pred).round(2), " population gap:", (meas - pop).round(2))
 
     # scipy's Hungarian and the brute-force fallback must agree, or the swap rate
-    # depends on whether scipy happens to be installed
-    _c = np.array([[0.9, 0.2, 0.1], [0.3, 0.4, 0.8], [0.2, 0.7, 0.3]])
-    _lsa = _linear_sum_assignment
-    got_fast = _best_permutation(_c)
-    globals()["_linear_sum_assignment"] = None
-    got_slow = _best_permutation(_c)
-    globals()["_linear_sum_assignment"] = _lsa
-    assert np.array_equal(got_fast, got_slow), (got_fast, got_slow)
+    # depends on whether scipy happens to be installed. Ties are the case that
+    # matters: two solvers can pick different optima of equal total overlap, and
+    # near-degenerate factors at high k are exactly where that would show up.
+    for _c in (np.array([[0.9, 0.2, 0.1], [0.3, 0.4, 0.8], [0.2, 0.7, 0.3]]),
+               np.array([[0.5, 0.5], [0.5, 0.5]]),                     # total tie
+               np.array([[0.8, 0.2, 0.0], [0.2, 0.8, 0.0], [0.0, 0.0, 0.9]]),
+               np.array([[0.6, 0.6, 0.1], [0.6, 0.6, 0.1], [0.1, 0.1, 0.7]])):
+        _lsa = _linear_sum_assignment
+        got_fast = _best_permutation(_c)
+        globals()["_linear_sum_assignment"] = None
+        got_slow = _best_permutation(_c)
+        globals()["_linear_sum_assignment"] = _lsa
+        assert np.array_equal(got_fast, got_slow), (_c, got_fast, got_slow)
 
     # raw paths are opt-in and shaped (reps, k)
     rp = simulate(500, 20, 2, a[:2], 0.16, "normal", reps=7, return_paths=True)

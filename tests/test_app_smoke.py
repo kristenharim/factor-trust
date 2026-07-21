@@ -77,6 +77,14 @@ class AppSmokeTests(unittest.TestCase):
         app = AppTest.from_file("app.py", default_timeout=180).run()
         green = next(ni for ni in app.get("number_input") if "usable below" in ni.label)
         app = green.set_value(89.0).run()
+        # assert the app survived before asserting what it says: the amber band's
+        # min_value tracks the green one, so raising green past the stored amber
+        # value is the case that could put a widget out of its own range. Without
+        # this line the content assertions below would pass on a crashed page.
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.error), [])
+        amber = next(ni for ni in app.get("number_input") if "caution below" in ni.label)
+        self.assertGreater(amber.value, 89.0, "amber must be pulled above green, not left stale")
         markdown = " ".join(m.value for m in app.get("markdown"))
         # f1 does not tie with anything, so at a 89 degree green band it must read usable
         self.assertIn("a hedge on it clears", markdown)
