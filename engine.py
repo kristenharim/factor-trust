@@ -275,14 +275,18 @@ def sweep_p(p_grid, n, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     p = 100,000 costs exactly what p = 100 costs — unlike sweep_n, every grid point
     here takes the same time.
 
-    Every grid point uses the SAME seed, so this is a common-random-numbers
-    sweep: path r shares its factor draw across every p, and the rotation term is
-    therefore identical at every p (it depends on the factor draw alone). That is
-    deliberate - it removes sampling noise from the comparison, so the flattening
-    is the effect and not the wiggle - but it means the points are coupled, not
-    independent. An earlier version of this docstring claimed the Wishart block
-    made the streams diverge; it does not, because Bartlett's variate count
-    depends on n only.
+    Every grid point uses the same seed, so this is a common-random-numbers sweep
+    WHEN the whole grid stays in one _wishart branch, i.e. when p_grid[0] - k >= n
+    and Bartlett is used throughout. Bartlett's variate count depends on n only,
+    so the factor draw is then shared across every p and the rotation term is
+    identical at every point. Below that threshold the small-p points take the
+    direct Gaussian branch, whose variate count is (p-k)*n, and the stream
+    desynchronizes from there on. out["crn"] reports which case you got; callers
+    that describe the sweep to a reader must read it rather than assume.
+
+    This claim has now been wrong twice in two different directions, so: it is
+    conditional, the condition is on the SMALLEST p in the grid against n, and
+    n goes to 504 in the app while the grid starts at 100.
 
     keep_paths keeps that many individual path angles per grid point, for drawing
     the spread behind the quantiles. Coupled is not the same as identical: the
@@ -296,13 +300,17 @@ def sweep_p(p_grid, n, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     # flatten onto the floor" is this panel's entire claim.
     a = validate_calibration(p_grid[0], n, k, a, d2, reps)
     out = {"p": list(p_grid), "q10": [], "q50": [], "q90": [], "paths": [],
-           "floor": deg_of(d2 / (n * a + d2))}
+           "floor": deg_of(d2 / (n * a + d2)),
+           # what the curves actually converge on: the floor is only one of the
+           # theorem's two terms, and the rotation term does not vanish in p
+           "limit": [], "crn": bool(min(p_grid) - k >= n)}
     for i, pp in enumerate(out["p"]):
         r = simulate(int(pp), n, k, a, d2, dist, dof, reps, seed,
                      return_paths=bool(keep_paths))
         out["q10"].append(r["quantiles"]["0.1"])
         out["q50"].append(r["quantiles"]["0.5"])
         out["q90"].append(r["quantiles"]["0.9"])
+        out["limit"].append(r["total_predicted_median"])
         if keep_paths:
             out["paths"].append(r["paths"]["angle"][:keep_paths])
         if on_point:
@@ -470,6 +478,12 @@ if __name__ == "__main__":
                   keep_paths=6)
     assert seen_p == [(1, 2, 300), (2, 2, 30_000)], seen_p
     assert swp["p"] == [300, 30_000] and len(swp["floor"]) == 2, swp
+    # the CRN flag must track the branch, not be asserted unconditionally
+    assert swp["crn"] is True, swp["crn"]                      # 300-2 >= 63
+    assert sweep_p([100], 252, 2, a[:2], 0.16, "normal", reps=5)["crn"] is False
+    # and the curves converge on floor PLUS rotation, never on the floor alone
+    assert all(lim[j] >= swp["floor"][j] - 1e-9
+               for lim in swp["limit"] for j in range(2)), (swp["limit"], swp["floor"])
     # a hundredfold more assets must not move the curve by much once it has settled
     assert abs(swp["q50"][0][0] - swp["q50"][1][0]) < 3.0, swp["q50"]
     # the band must actually bracket the median at every grid point

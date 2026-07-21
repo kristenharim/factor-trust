@@ -120,10 +120,20 @@ implementation against another, and it is asserted in `engine.py`'s self-check s
 rot. It is one calibration; the discrepancy grows as n falls and D̂'s eigenvalues spread
 further, and it has not been swept.
 
-**Asset sweep uses common random numbers.** Every point on the p grid runs from the same seed,
-so the factor draw is shared across p and the rotation term is identical at every point. That
-is deliberate — it takes sampling wobble out of a comparison whose whole subject is a trend —
-but the points are coupled rather than independent, and the panel says so.
+**Asset sweep uses common random numbers, conditionally.** Every point on the p grid runs from
+the same seed. That makes it a common-random-numbers sweep — factor draw shared across p,
+rotation term identical at every point — **only when the whole grid stays in one Wishart
+branch**, i.e. when the smallest p satisfies p−k ≥ n. The grid starts at p=100 and n goes to
+504, so above roughly n=96 the small-p points take the direct Gaussian branch, whose variate
+count is (p−k)·n, and the stream desynchronizes. The engine reports which case applies and the
+panel wording follows it.
+
+**The sweep converges on the theorem's limit, not on the floor.** The floor is one of the two
+terms in equation (5); the in-subspace rotation is a finite-n effect and does not vanish as
+p → ∞. At the default calibration and p=100,000 the medians are [16.90, 34.62, 43.95]° against
+a population floor of [15.73, 32.21, 40.03]° and an assembled limit of [16.91, 34.56, 43.93]°.
+The panel draws both lines so the residual gap is visibly rotation error rather than something
+more assets would close.
 
 Agreement between two engines is implementation validation, not theorem validation, and
 **external validity is not established**: the true loading direction is latent, so realized rotation cannot be

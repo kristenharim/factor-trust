@@ -148,10 +148,13 @@ with st.sidebar:
     # binding constraint is readability rather than cost. Past 5 or 6 statistical
     # factors the weak ones sit near the noise floor and swap labels constantly,
     # which the scorecard will tell you.
+    # n > k is an engine precondition, so the cap has to track n or the app can
+    # be driven into a state that stops with an error (n=8 with k=8).
+    k_ceiling = max(1, min(calibration.MAX_K, len(FACTOR_COLORS), n - 1))
     k = int(st.number_input("k · factors", min_value=1,
-                            max_value=min(calibration.MAX_K, len(FACTOR_COLORS)), value=3,
+                            max_value=k_ceiling, value=min(3, k_ceiling),
                             key="k_factors",
-                            help=f"Up to {min(calibration.MAX_K, len(FACTOR_COLORS))}. "
+                            help=f"Up to {k_ceiling} here (the engine needs n > k). "
                                  "Past 4 the defaults are extrapolated, and past 5 or 6 the weak "
                                  "factors swap labels so often that the scorecard stops naming "
                                  "them."))
@@ -334,8 +337,11 @@ st.markdown(
     f'src=<i>{"spectrum" if spectrum else "model"}</i></div>',
     unsafe_allow_html=True)
 
-if mode == "model calibration" and k > calibration.PAPER_K and \
-        vols[calibration.PAPER_K:] == DEFAULT_VOLS[calibration.PAPER_K:k]:
+# Check prevalence as well as vol: the strength is vol²×prevalence, so leaving
+# either one at its invented default still means an invented default.
+if mode == "model calibration" and k > calibration.PAPER_K and (
+        vols[calibration.PAPER_K:] == DEFAULT_VOLS[calibration.PAPER_K:k]
+        or prevs[calibration.PAPER_K:] == DEFAULT_PREVS[calibration.PAPER_K:k]):
     st.warning(
         f"Factors {calibration.PAPER_K + 1}–{k} are running on **extrapolated defaults**. The "
         "paper's illustrative table stops at "
@@ -355,7 +361,13 @@ if p < 10 * n:
 # anchor is what fixes it. Two directions drawn at random in R^p are almost
 # exactly orthogonal, so 90° is not the worst case on some arbitrary scale, it is
 # what guessing scores. Every angle on this page is read against that.
-worst_j = max(range(k), key=lambda j: q(0.5, j))
+# Name only a factor whose name means something. Headlining "f8 is 73° off" when
+# f8 swaps labels on half the runs attaches a precise number to a direction the
+# estimator cannot reliably identify, which is the exact failure the tie logic
+# exists to prevent. Fall back to the worst STABLE factor, and if none is stable
+# say nothing beyond f1 and let the scorecard carry it.
+stable = [j for j in reporting.stable_factor_indices(k, ties) if j != 0]
+worst_j = max(stable, key=lambda j: q(0.5, j)) if stable else 0
 st.markdown(
     f'<div style="font-size:1.35rem;line-height:1.5;margin:.2rem 0 .1rem">'
     f'Your <b style="color:{FACTOR_COLORS[0]}">f1</b> direction is typically '
@@ -978,7 +990,15 @@ if st.button("and would more assets help?", width="content"):
             name=f"f{j+1}",
             hovertemplate=f"<b>f{j+1}</b><br>p=%{{x:,}}<br>median %{{y:.1f}}°<extra></extra>"))
         pfig.add_hline(y=psw["floor"][j], line=dict(color=FACTOR_COLORS[j], width=1, dash="dash"),
-                       opacity=.55)
+                       opacity=.35)
+        # The curves do NOT settle on the floor: the floor is one of the two terms
+        # in the theorem and the rotation term does not vanish in p, only in n.
+        # Drawing the assembled limit as well is the difference between a panel
+        # that shows the result and one that misstates it.
+        pfig.add_trace(go.Scatter(
+            x=P_GRID, y=[row[j] for row in psw["limit"]], mode="lines",
+            line=dict(color=FACTOR_COLORS[j], width=1.4, dash="longdash"),
+            opacity=.85, showlegend=False, hoverinfo="skip"))
     pfig.add_vline(x=p, line=dict(color="#6b7683", width=1, dash="dot"),
                    annotation_text="your p", annotation_font=dict(size=11, color="#6b7683"))
     # dtick=1 on a log axis is one tick per decade; the default adds 2x and 5x
@@ -1003,27 +1023,39 @@ if st.button("and would more assets help?", width="content"):
     from_p = P_GRID[here]
     first, last = psw["q50"][here], psw["q50"][-1]
     # Quote the grid point actually measured, not the user's p, or at p=500 the
-    # sentence claims a number it read off the p=1000 row.
-    at_top = here == len(P_GRID) - 1
+    # sentence claims a number it read off the p=1000 row. at_top compares p to
+    # the grid top rather than the index, since `here` saturates at the last
+    # index for anything above 30,000 and would claim "nothing left to buy" at
+    # p=50,000 with a 2x expansion still on the grid.
+    at_top = p >= P_GRID[-1]
     span = (f'Your p = {p:,} is at or past the top of the grid, so there is nothing left to '
             f'buy here. Across the flat stretch from p = {P_GRID[-3]:,} the median moves by '
             if at_top else
             f'From p = {from_p:,} (the nearest grid point at or above your {p:,}) to '
             f'p = {P_GRID[-1]:,}, {P_GRID[-1] / from_p:.0f}× the universe, the median moves by ')
     ref = psw["q50"][-3] if at_top else first
+    crn_note = (
+        'Every grid point shares one seed and the whole grid stays in one Wishart branch, so '
+        'this is a <b>common-random-numbers</b> sweep: the factor draw is held fixed across p '
+        'and only the noise block is redrawn, which strips sampling wobble out of the '
+        'comparison. The points stay unjoined because coupled is not the same as identical.'
+        if psw["crn"] else
+        f'<b>Not</b> a common-random-numbers sweep at this n: the smallest grid point '
+        f'(p = {P_GRID[0]:,}) has p−k &lt; n = {n}, which sends it down a different noise branch '
+        'and desynchronizes the draw from the larger p. Treat the points as independent runs.')
     st.markdown(
-        '<div class="note">Solid is the median run, the shaded band is q10–q90, dashed is the '
-        'floor, and the faint points are 25 individual runs at each grid point. Every grid point '
-        'shares one seed, so this is a <b>common-random-numbers</b> sweep: the factor draw is '
-        'held fixed across p and only the noise block is redrawn, which strips sampling wobble '
-        'out of the comparison. The points stay unjoined because coupled is not the same as '
-        'identical. '
+        '<div class="note">Solid is the median run, the shaded band is q10–q90, the long-dashed '
+        'line is the theorem&#39;s limit (floor + rotation), the faint dashed line below it is '
+        'the floor alone, and the points are 25 individual runs per grid point. '
+        + crn_note + " "
         + span
         + ", ".join(f'<b>{ref[j] - last[j]:+.1f}°</b> on f{j+1}' for j in range(k))
-        + ". The curves flatten onto the floor and stay there, because the floor is a "
-          "p → ∞ statement at fixed n: it is set by n and the signal-to-noise ratio, and "
-          "buying more assets does not buy any of either. What moves it is more history "
-          "(the sweep above) or a stronger factor."
+        + ". <b>The curves settle onto the limit line, not onto the floor.</b> The floor is only "
+          "one of the theorem&#39;s two terms; the in-subspace rotation is a finite-<i>n</i> "
+          "effect and does not vanish as p grows, so the gap you can see between the two dashed "
+          "lines is rotation error that no amount of assets removes. Both are p → ∞ statements "
+          "at fixed n, which is why adding assets buys nothing here. What moves them is more "
+          "history (the sweep above) or a stronger factor."
           "<br>The left of the grid is still climbing out of the pre-asymptotic regime, so "
           "the drop visible there is the asymptotics arriving, <b>not</b> a return on adding "
           "assets. Read the flat right-hand stretch, which is where any real universe sits."
@@ -1129,10 +1161,17 @@ the only difference being measured. That checks equation (5) *inside* the simula
 implementation against another, and it is asserted in the engine self-check so it cannot rot. It is
 one calibration: the gap widens as n falls and D̂'s eigenvalues spread, and that has not been swept.
 
-**The asset sweep uses common random numbers.** Every point on the p grid shares one seed, so the
-factor draw is held fixed across p and only the noise block is redrawn. That removes sampling wobble
-from a comparison whose subject is a trend, at the cost of the points being coupled rather than
-independent.
+**The asset sweep uses common random numbers, conditionally.** Every point on the p grid shares one
+seed, but that only couples the draws when the whole grid stays in one Wishart branch (smallest
+p−k ≥ n). The grid starts at p=100 and n goes to 504, so above roughly n=96 the small-p points take
+the direct Gaussian branch and the stream desynchronizes. The panel reads the engine's flag and says
+which case you are in rather than asserting one.
+
+**That sweep converges on the theorem's limit, not on the floor.** The floor is one of two terms;
+the in-subspace rotation is a finite-n effect and does not shrink as p grows. At default settings and
+p=100,000 the medians are [16.90, 34.62, 43.95]° against a floor of [15.73, 32.21, 40.03]° and an
+assembled limit of [16.91, 34.56, 43.93]°. Both lines are drawn, so the visible gap between them is
+rotation error rather than something a bigger universe would close.
 
 **External validity is not established.** The true loading direction is latent, so "realized
 rotation" cannot be observed directly on real equity panels; cross-window sample rotation also
