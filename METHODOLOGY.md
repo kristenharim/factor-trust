@@ -111,16 +111,26 @@ totals sit above the floor as the theorem requires.
 **Decomposition check.** The engine also assembles the theorem pathwise: per path it forms
 floor + (1−floor)·sin²∠(ŵⱼ, eⱼ) at that path's realized ρⱼ, and the median of that lands on
 the separately-simulated median total. At the default calibration (p=3000, n=63, k=3, t(6),
-2000 paths) the two agree to 0.1–0.25°, against 0.5–3.3° for the same prediction built on the
-population strength λ instead of realized ρ. That is a check of equation (5) inside the
-simulator, not merely of one implementation against another, and it is asserted in
-`engine.py`'s self-check so it cannot rot. It is one calibration; the discrepancy grows as n
-falls and D̂'s eigenvalues spread further, and it has not been swept.
+2000 paths) the two agree to **0.0–0.34°**, against **0.48–3.28°** for the same assembly built
+on the population strength λ instead of realized ρ. Both comparators are assembled per path
+and medianed once, so the only thing separating them is the substitution; an earlier version
+built the λ side from a median rotation, which folded median-of-terms error into the gap it
+attributed to λ. That is a check of equation (5) inside the simulator, not merely of one
+implementation against another, and it is asserted in `engine.py`'s self-check so it cannot
+rot. It is one calibration; the discrepancy grows as n falls and D̂'s eigenvalues spread
+further, and it has not been swept.
+
+**Asset sweep uses common random numbers.** Every point on the p grid runs from the same seed,
+so the factor draw is shared across p and the rotation term is identical at every point. That
+is deliberate — it takes sampling wobble out of a comparison whose whole subject is a trend —
+but the points are coupled rather than independent, and the panel says so.
 
 Agreement between two engines is implementation validation, not theorem validation, and
 **external validity is not established**: the true loading direction is latent, so realized rotation cannot be
 observed on real equity panels. Every number is internally consistent and externally
 unproven.
 
-Defaults are the paper's illustrative calibration (US equity, Bayraktar et al. 2014), not
-fitted to any current book.
+Defaults for factors 1–4 are the paper's illustrative calibration (US equity, Bayraktar et al.
+2014). The k input goes to 8; strengths for factors 5–8 are a decaying continuation chosen only
+to keep vol²×prevalence ordered, are not sourced from the paper or anywhere else, and the app
+raises a warning when they are in use. Nothing here is fitted to any current book.

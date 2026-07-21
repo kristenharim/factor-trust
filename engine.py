@@ -25,8 +25,10 @@ import numpy as np
 
 try:
     from scipy.linalg import eigh as _sp_eigh
+    from scipy.optimize import linear_sum_assignment as _linear_sum_assignment
 except ImportError:      # numpy-only deployments (the vault's stdlib server)
     _sp_eigh = None
+    _linear_sum_assignment = None
 
 SEED = 20260716
 QS = (0.025, 0.10, 0.25, 0.50, 0.75, 0.80, 0.90, 0.95, 0.975)
@@ -106,8 +108,20 @@ def validate_calibration(p, n, k, a, d2, reps=1):
 
 
 def _best_permutation(cosm):
-    """One-to-one true-factor assignment maximizing total absolute overlap."""
+    """One-to-one true-factor assignment maximizing total absolute overlap.
+
+    Hungarian when scipy is there, brute force otherwise. The brute force is
+    O(k!) per path, which is 24 evaluations at k=4 and 40,320 at k=8, so it is
+    what capped the app's factor count rather than anything statistical.
+    """
     k = cosm.shape[0]
+    if _linear_sum_assignment is not None:
+        # cosm is (true i, estimated j). scipy hands back pairs; the caller wants
+        # it indexed BY estimated column, so invert rather than returning row_ind.
+        rows, cols = _linear_sum_assignment(cosm, maximize=True)
+        best = np.empty(k, dtype=int)
+        best[cols] = rows
+        return best
     return np.asarray(max(
         itertools.permutations(range(k)),
         key=lambda perm: sum(cosm[perm[j], j] for j in range(k))), dtype=int)
@@ -197,6 +211,12 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED, return_paths=
     # separately do not add.
     floor_path = d2 / (n * rho + d2)
     pred_path = floor_path + (1.0 - floor_path) * rot
+    # The population-strength comparator, assembled the SAME way so the only
+    # difference measured is lambda vs realized rho. Building it from a median
+    # rotation instead would fold median-of-terms error into the gap and
+    # overstate how much the rho substitution is worth.
+    floor_pop = d2 / (n * a + d2)
+    pred_pop = floor_pop + (1.0 - floor_pop) * rot
     out = {
         "quantiles": {str(q): np.quantile(ang, q, axis=0).round(2).tolist() for q in QS},
         "mean": ang.mean(axis=0).round(2).tolist(),
@@ -207,6 +227,8 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED, return_paths=
         "rotation_median": np.median(rot, axis=0).round(4).tolist(),
         # median of the assembled theorem prediction; compare against quantiles 0.5
         "total_predicted_median": deg(np.median(pred_path, axis=0)).round(2).tolist(),
+        # the same assembly at population lambda, the like-for-like comparator
+        "total_predicted_pop_median": deg(np.median(pred_pop, axis=0)).round(2).tolist(),
         "snr": (n * a / d2).round(2).tolist(),
         "q90_mc95": _q90_mc_interval(ang, seed),
         "swap_rate": (swaps / reps).round(4).tolist(),
@@ -253,12 +275,20 @@ def sweep_p(p_grid, n, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
     p = 100,000 costs exactly what p = 100 costs — unlike sweep_n, every grid point
     here takes the same time.
 
+    Every grid point uses the SAME seed, so this is a common-random-numbers
+    sweep: path r shares its factor draw across every p, and the rotation term is
+    therefore identical at every p (it depends on the factor draw alone). That is
+    deliberate - it removes sampling noise from the comparison, so the flattening
+    is the effect and not the wiggle - but it means the points are coupled, not
+    independent. An earlier version of this docstring claimed the Wishart block
+    made the streams diverge; it does not, because Bartlett's variate count
+    depends on n only.
+
     keep_paths keeps that many individual path angles per grid point, for drawing
-    the spread behind the quantiles. They are NOT a path followed across p: each
-    grid point is its own simulate() call and the Wishart block consumes a
-    different number of variates at each p, so the streams diverge immediately.
-    Draw them as points, never joined up, or the picture claims a continuity the
-    simulation does not have.
+    the spread behind the quantiles. Coupled is not the same as identical: the
+    noise block is redrawn at each p (same variates, different shape parameters),
+    so a point at one p is related to but not a continuation of the point at the
+    next. Draw them unjoined.
     """
     out = {"p": list(p_grid), "q10": [], "q50": [], "q90": [], "paths": [],
            "floor": deg_of(d2 / (n * np.asarray(a, dtype=float) + d2))}
@@ -396,12 +426,23 @@ if __name__ == "__main__":
     pred = np.array(r["total_predicted_median"])
     assert np.all(np.abs(meas - pred) < 1.0), (meas, pred)
     # ...and it must beat the same prediction with the population strength a
-    # substituted for realized rho, which is the extra n -> inf limit. If this
-    # ever fails, the pathwise floor has stopped being the better tick and the
-    # readout column claiming so is wrong.
-    fa = 0.16 / (63 * np.array(a) + 0.16)
-    pop = np.degrees(np.arcsin(np.sqrt(fa + (1 - fa) * np.array(r["rotation_median"]))))
+    # substituted for realized rho, which is the extra n -> inf limit. Both sides
+    # are assembled per path and medianed once, so the only difference being
+    # measured is the substitution. If this ever fails, the pathwise floor has
+    # stopped being the better tick and the readout column claiming so is wrong.
+    pop = np.array(r["total_predicted_pop_median"])
     assert np.all(np.abs(meas - pred) <= np.abs(meas - pop)), (meas, pred, pop)
+    print("  pathwise gap:", (meas - pred).round(2), " population gap:", (meas - pop).round(2))
+
+    # scipy's Hungarian and the brute-force fallback must agree, or the swap rate
+    # depends on whether scipy happens to be installed
+    _c = np.array([[0.9, 0.2, 0.1], [0.3, 0.4, 0.8], [0.2, 0.7, 0.3]])
+    _lsa = _linear_sum_assignment
+    got_fast = _best_permutation(_c)
+    globals()["_linear_sum_assignment"] = None
+    got_slow = _best_permutation(_c)
+    globals()["_linear_sum_assignment"] = _lsa
+    assert np.array_equal(got_fast, got_slow), (got_fast, got_slow)
 
     # raw paths are opt-in and shaped (reps, k)
     rp = simulate(500, 20, 2, a[:2], 0.16, "normal", reps=7, return_paths=True)

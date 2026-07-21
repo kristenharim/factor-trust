@@ -29,13 +29,20 @@ import engine
 
 # paper Table 1 (annualized %) and the G_B diagonal; provenance in the app's
 # methodology register. Illustrative, not fitted to any current book.
-DEFAULT_VOLS = [16.0, 8.0, 6.0, 5.0]
-DEFAULT_PREVS = [1.25, 1.0, 1.0, 1.0]
+#
+# The paper's table stops at four. Entries 5 to 8 are a decaying continuation of
+# it, NOT paper values: they keep vol^2 x prevalence strictly decreasing so
+# Assumption 3 still holds, and they exist so the k input has somewhere to go.
+# Running past k=4 on the defaults means running on invented strengths, so set
+# your own in the sidebar and read the app's note.
+DEFAULT_VOLS = [16.0, 8.0, 6.0, 5.0, 4.5, 4.0, 3.5, 3.0]
+DEFAULT_PREVS = [1.25, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+PAPER_K = 4          # how far DEFAULT_VOLS is sourced rather than extrapolated
 DEFAULT_IDIO = 40.0
 DEFAULT_P = 3000
 DEFAULT_K = 3
 DEFAULT_DIST = "t"
-MAX_K = 4
+MAX_K = len(DEFAULT_VOLS)
 
 # 1mo ... 1y of daily data. Stops at 252 by decision, not by cost: the model
 # holds loadings fixed for the whole window, so reading further would answer

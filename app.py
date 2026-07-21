@@ -106,7 +106,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-FACTOR_COLORS = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc"]
+FACTOR_COLORS = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc",
+                 "#4fa3a0", "#c07ba0", "#8a9b4f", "#b8794f"]
 # desaturated to sit with the rest of the palette; red is the only new hue and it
 # is reserved for "do not read this row as a named direction"
 STATE_COLORS = {"usable": "#4a9d6a", "caution": "#d98a3a",
@@ -137,7 +138,13 @@ with st.sidebar:
     mode = st.radio("mode", ["model calibration", "sample spectrum"], label_visibility="collapsed")
     n = int(st.number_input("n · observations", min_value=8, max_value=504, value=63))
     p = int(st.number_input("p · assets", min_value=20, max_value=100_000, value=3000, step=100))
-    k = int(st.number_input("k · factors", min_value=1, max_value=4, value=3))
+    # The cap used to be 4 because the label assignment brute-forced all k!
+    # permutations per path. That is now Hungarian when scipy is present, so the
+    # binding constraint is readability rather than cost. Past 5 or 6 statistical
+    # factors the weak ones sit near the noise floor and swap labels constantly,
+    # which the scorecard will tell you.
+    k = int(st.number_input("k · factors", min_value=1,
+                            max_value=min(calibration.MAX_K, len(FACTOR_COLORS)), value=3))
     dist = st.selectbox("factor return distribution", ["Student-t (6 df)", "Normal"])
     reps = int(st.select_slider("simulations", options=[200, 400, 1000, 2000], value=400))
     tie_cutoff_pct = st.number_input(
@@ -151,14 +158,18 @@ with st.sidebar:
     # the number costs rather than pronouncing the factor good or bad.
     band_green = float(st.number_input(
         "usable below · q90 °", min_value=1.0, max_value=89.0, value=10.0, step=1.0,
+        key="band_green",
         help="Your call, not a theorem threshold. Set it from what you do with the "
              "direction: tight for attribution, loose for broad neutralization."))
+    # min_value tracks the green band so the widget can never display a value the
+    # scorecard is not using. Both inputs carry explicit keys: without them the
+    # widget identity is derived from its parameters, so moving the green band
+    # would re-key the amber one and drop whatever the reader had typed there.
     band_amber = float(st.number_input(
-        "caution below · q90 °", min_value=2.0, max_value=90.0, value=25.0, step=1.0,
+        "caution below · q90 °", min_value=band_green + 1.0, max_value=90.0,
+        value=max(25.0, band_green + 1.0), step=1.0, key="band_amber",
         help="Above this the scorecard calls the factor unusable. A direction picked "
              "at random scores 90°, which is the scale everything here is read against."))
-    if band_amber <= band_green:
-        band_amber = band_green + 1.0
 
     if mode == "model calibration":
         st.markdown('<div class="rule">calibration</div>', unsafe_allow_html=True)
@@ -312,6 +323,15 @@ st.markdown(
     f'dist=<i>{dist_key}</i> &nbsp; reps=<i>{reps}</i> &nbsp; seed=<i>{r["seed"]}</i> &nbsp; '
     f'src=<i>{"spectrum" if spectrum else "model"}</i></div>',
     unsafe_allow_html=True)
+
+if mode == "model calibration" and k > calibration.PAPER_K and \
+        vols[calibration.PAPER_K:] == DEFAULT_VOLS[calibration.PAPER_K:k]:
+    st.warning(
+        f"Factors {calibration.PAPER_K + 1}–{k} are running on **extrapolated defaults**. The "
+        "paper's illustrative table stops at "
+        f"{calibration.PAPER_K}; the strengths above that are a decaying continuation chosen "
+        "only to keep vol²×prevalence ordered, and they are not sourced from anywhere. Put your "
+        "own numbers in the sidebar before reading anything into those rows.")
 
 if p < 10 * n:
     st.warning(
@@ -516,7 +536,11 @@ df = pd.DataFrame([{
     "snr": round(snr_of(j), 1),
     "floor°": round(floor_of(j), 1),
     "asym°": round(r["floor_asymptotic"][j], 1),
-    "path°": round(r["floor_pathwise_median"][j], 1),
+    # model-side by construction: rho comes from the simulated factor draw. In
+    # spectrum mode floor° switches to your eigenvalues but this column cannot,
+    # so it is dropped there rather than sitting next to a measured number
+    # looking like one.
+    **({} if spectrum else {"path°": round(r["floor_pathwise_median"][j], 1)}),
     "q50°": round(q(0.5, j), 1),
     "q80°": round(q(0.8, j), 1),
     "q90°": round(q(0.9, j), 1),
@@ -535,13 +559,16 @@ st.caption("q90lo/q90hi = a 95% bootstrap interval, swaplo/swaphi = a 95% Wilson
            "both for Monte Carlo estimation noise only, not uncertainty about whether the "
            "simulator describes real markets. A tie verdict decided by less than the swap "
            "interval is noise; raise the simulation count before trusting it.")
-st.caption("asym° evaluates the floor at the population strength vol²×prevalence, which is a "
-           "second (n → ∞) limit on top of the p → ∞ one, and reads optimistic for the weaker "
-           "factors at small n. path° evaluates the same formula at each path's realized ρⱼ and "
-           "is the theorem's own floor conditional on F. Assembled pathwise, floor + rotation "
-           f"lands on the simulated median: predicted "
-           f"{'/'.join(f'{v:.1f}' for v in r['total_predicted_median'])}° against measured "
-           f"{'/'.join(f'{q(0.5, j):.1f}' for j in range(k))}°.")
+if not spectrum:
+    st.caption("asym° evaluates the floor at the population strength vol²×prevalence, which is a "
+               "second (n → ∞) limit on top of the p → ∞ one, and reads optimistic for the weaker "
+               "factors at small n. path° evaluates the same formula at each path's realized ρⱼ "
+               "and is the theorem's own floor conditional on F. Assembled pathwise, floor + "
+               f"rotation lands on the simulated median: predicted "
+               f"{'/'.join(f'{v:.1f}' for v in r['total_predicted_median'])}° against measured "
+               f"{'/'.join(f'{q(0.5, j):.1f}' for j in range(k))}°, where the same assembly at "
+               f"population strength gives "
+               f"{'/'.join(f'{v:.1f}' for v in r['total_predicted_pop_median'])}°.")
 
 # The tie warning sits directly under the rows it disqualifies, not below the
 # consequence text: a reader who stops at the table must still see it.
@@ -585,7 +612,10 @@ if k > 1:
         texttemplate="%{text}", textfont=dict(size=12),
         colorscale=[[0, "#141a21"], [0.5, "#8a5a2a"], [1, "#5b91c9"]],
         zmin=0, zmax=100, showscale=False,
-        hovertemplate="true %{y} matched to %{x}<br>%{z:.1f}% of runs<extra></extra>"))
+        # phrased estimated-first because the columns are the distributions; the
+        # row reading is the one the note below tells the reader not to take
+        hovertemplate="estimated %{x} matched to true %{y}"
+                      "<br>%{z:.1f}% of that column&#39;s runs<extra></extra>"))
     hm.update_layout(template="plotly_dark", height=90 + 52 * k,
                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                      font=dict(family="JetBrains Mono, monospace", size=11, color="#b6bfc9"),
@@ -960,15 +990,26 @@ if st.button("and would more assets help?", width="content"):
     # evidence AGAINST the panel's own point. The decision on the table is
     # "should I expand the universe I already have", so that is the comparison.
     here = next((i for i, pp in enumerate(P_GRID) if pp >= p), len(P_GRID) - 1)
+    from_p = P_GRID[here]
     first, last = psw["q50"][here], psw["q50"][-1]
+    # Quote the grid point actually measured, not the user's p, or at p=500 the
+    # sentence claims a number it read off the p=1000 row.
+    at_top = here == len(P_GRID) - 1
+    span = (f'Your p = {p:,} is at or past the top of the grid, so there is nothing left to '
+            f'buy here. Across the flat stretch from p = {P_GRID[-3]:,} the median moves by '
+            if at_top else
+            f'From p = {from_p:,} (the nearest grid point at or above your {p:,}) to '
+            f'p = {P_GRID[-1]:,}, {P_GRID[-1] / from_p:.0f}× the universe, the median moves by ')
+    ref = psw["q50"][-3] if at_top else first
     st.markdown(
         '<div class="note">Solid is the median run, the shaded band is q10–q90, dashed is the '
-        'floor, and the faint points are 25 individual runs at each grid point. They are drawn '
-        '<b>unjoined on purpose</b>: each p is its own independent simulation, so no single run '
-        'continues across the axis. '
-        f'Going from your p = {p:,} to p = {P_GRID[-1]:,} '
-        f'({P_GRID[-1] / max(p, 1):.0f}× the universe) moves the median by '
-        + ", ".join(f'<b>{first[j] - last[j]:+.1f}°</b> on f{j+1}' for j in range(k))
+        'floor, and the faint points are 25 individual runs at each grid point. Every grid point '
+        'shares one seed, so this is a <b>common-random-numbers</b> sweep: the factor draw is '
+        'held fixed across p and only the noise block is redrawn, which strips sampling wobble '
+        'out of the comparison. The points stay unjoined because coupled is not the same as '
+        'identical. '
+        + span
+        + ", ".join(f'<b>{ref[j] - last[j]:+.1f}°</b> on f{j+1}' for j in range(k))
         + ". The curves flatten onto the floor and stay there, because the floor is a "
           "p → ∞ statement at fixed n: it is set by n and the signal-to-noise ratio, and "
           "buying more assets does not buy any of either. What moves it is more history "
@@ -1072,10 +1113,16 @@ floor as the theorem requires. The footer re-runs the reference check live on th
 
 **Decomposition check.** The engine assembles the theorem pathwise — floor + (1−floor)·sin²∠(ŵⱼ, eⱼ)
 at each path's own ρⱼ — and the median of that lands on the separately simulated median total. At the
-default calibration the two agree to 0.1–0.25°, against 0.5–3.3° for the same prediction built on the
-population strength λ. That checks equation (5) *inside* the simulator rather than one implementation
-against another, and it is asserted in the engine self-check so it cannot rot. It is one calibration:
-the gap widens as n falls and D̂'s eigenvalues spread, and that has not been swept.
+default calibration the two agree to **0.0–0.34°**, against **0.48–3.28°** for the same assembly at
+the population strength λ. Both sides are built per path and medianed once, so the substitution is
+the only difference being measured. That checks equation (5) *inside* the simulator rather than one
+implementation against another, and it is asserted in the engine self-check so it cannot rot. It is
+one calibration: the gap widens as n falls and D̂'s eigenvalues spread, and that has not been swept.
+
+**The asset sweep uses common random numbers.** Every point on the p grid shares one seed, so the
+factor draw is held fixed across p and only the noise block is redrawn. That removes sampling wobble
+from a comparison whose subject is a trend, at the cost of the points being coupled rather than
+independent.
 
 **External validity is not established.** The true loading direction is latent, so "realized
 rotation" cannot be observed directly on real equity panels; cross-window sample rotation also
