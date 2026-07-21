@@ -8,8 +8,10 @@ Live prototype: https://pca-factor-trust.streamlit.app/
 
 Given a factor-model calibration or sample spectrum, Factor Trust reports:
 
-- an observable asymptotic floor derived from the sample eigenvalues;
+- an observable asymptotic floor derived from the sample eigenvalues, alongside the same floor evaluated pathwise at each run's realized ρⱼ;
+- a per-factor scorecard in plain language, scored against usability bands you set yourself;
 - a conditional Monte Carlo distribution of total direction error;
+- an asset-budget sweep showing the error flatten onto the floor as p grows a thousandfold;
 - the implied residual directional variance after an idealized hedge;
 - warnings when adjacent factor identities are unstable;
 - a calibration-sensitivity panel: the envelope on q90 and floor when each input group is scaled ±10/15/20%, and whether the tie verdict itself flips;
@@ -27,6 +29,12 @@ Three kinds of output must remain separate.
 The ratio ℓ/θⱼ estimates an asymptotic lower bound on factor-direction error, where θⱼ is a leading sample eigenvalue and ℓ is the average bulk eigenvalue.
 
 At finite `(n, p)`, this plug-in value has sampling noise. It is not a pathwise guarantee.
+
+The readout shows two model-side floors beside it. `asym°` evaluates the closed form at the population strength vol²×prevalence; `path°` evaluates it at each path's realized ρⱼ, which is the quantity the theorem actually names since it conditions on F. They separate at small n, and `asym°` is the optimistic one.
+
+### Angles, read against a baseline
+
+Every error is reported as the angle between the estimated and true direction. Two directions drawn at random in high dimensions are almost exactly orthogonal, so **90° is what guessing scores**, not an abstract maximum. sin² of that angle is both the share of the estimated direction pointing somewhere else and the share of exposure an idealized hedge fails to remove.
 
 ### Conditional simulation
 

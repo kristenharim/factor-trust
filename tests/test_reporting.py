@@ -35,6 +35,33 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(groups, [(1, 2)])
         self.assertEqual(reporting.stable_factor_indices(3, groups), [0])
 
+    def test_residual_variance_is_sin_squared_of_the_angle(self):
+        # the two readings the app relies on: share pointing elsewhere, and share
+        # an idealized hedge fails to remove. 45 degrees is the half-and-half case.
+        self.assertAlmostEqual(reporting.resid_var_pct(0.0), 0.0)
+        self.assertAlmostEqual(reporting.resid_var_pct(45.0), 50.0)
+        self.assertAlmostEqual(reporting.resid_var_pct(90.0), 100.0)
+        # a random direction in high dimensions sits at the baseline, and the
+        # baseline must mean "all of it points elsewhere" or the anchor is a lie
+        self.assertAlmostEqual(
+            reporting.resid_var_pct(reporting.RANDOM_BASELINE_DEG), 100.0)
+
+    def test_verdict_bands_are_inputs_and_instability_overrides_them(self):
+        # a tight angle inside the user's green band
+        state, text = reporting.verdict(8.0, 0.0, green_deg=10, amber_deg=25, tie_tol=0.05)
+        self.assertEqual(state, "usable")
+        self.assertIn("%", text)
+        # the SAME angle is not usable once the reader tightens the band
+        self.assertEqual(
+            reporting.verdict(8.0, 0.0, green_deg=5, amber_deg=25, tie_tol=0.05)[0], "caution")
+        self.assertEqual(
+            reporting.verdict(40.0, 0.0, green_deg=10, amber_deg=25, tie_tol=0.05)[0], "unusable")
+        # a swap rate over the cutoff outranks any angle: a precise number on the
+        # wrong factor is worse than a loose one on the right factor
+        state, text = reporting.verdict(2.0, 0.09, green_deg=10, amber_deg=25, tie_tol=0.05)
+        self.assertEqual(state, "unstable")
+        self.assertIn("span", text)
+
     def test_export_preserves_reliability_and_subspace_claim_boundary(self):
         payload = reporting.build_export_payload(
             engine_fingerprint="abc123",

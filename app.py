@@ -102,6 +102,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 FACTOR_COLORS = ["#5b91c9", "#4a9d6a", "#d98a3a", "#9d84cc"]
+# desaturated to sit with the rest of the palette; red is the only new hue and it
+# is reserved for "do not read this row as a named direction"
+STATE_COLORS = {"usable": "#4a9d6a", "caution": "#d98a3a",
+                "unusable": "#c96a6a", "unstable": "#c96a6a"}
 BAND_COLORS = ["#1c242e", "#28323e", "#38465a"]   # 95 / 80 / 50 %
 REPO = "https://github.com/kristenharim/factor-trust"
 
@@ -114,10 +118,8 @@ SWEEP_REPS = calibration.LIVE_REPS
 SWEEP_FINGERPRINT = calibration.cache_fingerprint()
 
 
-def resid_var_pct(angle_deg):
-    """Fraction of the factor's directional variance a book neutralized on the
-    ESTIMATED direction still carries: sin² of the angle to the true one."""
-    return math.sin(math.radians(angle_deg)) ** 2 * 100
+# moved to reporting.py so the wording helpers that share it are unit-tested
+resid_var_pct = reporting.resid_var_pct
 
 
 def rule(label):
@@ -138,6 +140,20 @@ with st.sidebar:
         help="Display policy, not a statistical test: above this label-swap rate the app "
              "leads with the span instead of the named rows. At 400 paths a rate near 5% "
              "carries ≈±2pt of Monte Carlo noise — the readout shows the interval.")
+    # Usability is a property of the USE, not of the angle: 17° is fine for
+    # neutralizing broad market exposure and useless for attributing PnL to
+    # factor 3. So the bands are the reader's to set and the scorecard says what
+    # the number costs rather than pronouncing the factor good or bad.
+    band_green = float(st.number_input(
+        "usable below · q90 °", min_value=1.0, max_value=89.0, value=10.0, step=1.0,
+        help="Your call, not a theorem threshold. Set it from what you do with the "
+             "direction: tight for attribution, loose for broad neutralization."))
+    band_amber = float(st.number_input(
+        "caution below · q90 °", min_value=2.0, max_value=90.0, value=25.0, step=1.0,
+        help="Above this the scorecard calls the factor unusable. A direction picked "
+             "at random scores 90°, which is the scale everything here is read against."))
+    if band_amber <= band_green:
+        band_amber = band_green + 1.0
 
     if mode == "model calibration":
         st.markdown('<div class="rule">calibration</div>', unsafe_allow_html=True)
@@ -214,7 +230,17 @@ except ValueError as e:
 # ------------------------------------------------------------------ cached engine calls
 @st.cache_data(show_spinner="simulating…")
 def run_sim(p, n, k, a, d2, dist, reps, engine_fp):
-    return engine.simulate(p, n, k, list(a), d2, dist, 6, reps)
+    # paths come back too: the histogram and the distribution-swap panel both need
+    # the raw draws, and asking for them here is free next to re-running the sim
+    return engine.simulate(p, n, k, list(a), d2, dist, 6, reps, return_paths=True)
+
+
+@st.cache_data(show_spinner="simulating the other distribution…")
+def run_alt_dist(p, n, k, a, d2, dist, reps, engine_fp):
+    """Same calibration, opposite factor-return law. Everything else identical,
+    so the difference between the two fans is attributable to that one choice."""
+    other = "normal" if dist == "t" else "t"
+    return engine.simulate(p, n, k, list(a), d2, other, 6, reps, return_paths=True), other
 
 
 @st.cache_data(show_spinner=False)
@@ -289,6 +315,23 @@ if p < 10 * n:
         "The finite-p simulation still runs, but do not present the asymptotic tick as settled.")
 
 # ------------------------------------------------------------------ headline
+# A bare "44°" has no scale attached and a reader supplies the wrong one: 44 is
+# less than 90, 90 sounds like a maximum, so 44 reads as "half wrong, fine". The
+# anchor is what fixes it. Two directions drawn at random in R^p are almost
+# exactly orthogonal, so 90° is not the worst case on some arbitrary scale, it is
+# what guessing scores. Every angle on this page is read against that.
+worst_j = max(range(k), key=lambda j: q(0.5, j))
+st.markdown(
+    f'<div style="font-size:1.35rem;line-height:1.5;margin:.2rem 0 .1rem">'
+    f'Your <b style="color:{FACTOR_COLORS[0]}">f1</b> direction is typically '
+    f'<b>{q(0.5, 0):.0f}° off</b> the true one.'
+    + (f' <b style="color:{FACTOR_COLORS[worst_j]}">f{worst_j+1}</b> is '
+       f'<b>{q(0.5, worst_j):.0f}° off</b>.' if worst_j != 0 else '')
+    + f'</div><div class="note" style="margin:0 0 .5rem">A direction picked at random would be '
+      f'{reporting.RANDOM_BASELINE_DEG:.0f}° off, so that is the scale to read these against.'
+      f'</div>',
+    unsafe_allow_html=True)
+
 st.markdown(
     '<div class="verdict"><span class="lbl">90% of runs<br>land within</span>'
     + "".join(f'<span class="v" style="color:{color}"><u>{lab}</u>{val:.0f}°</span>'
@@ -300,6 +343,26 @@ st.markdown(
     'If these calibration numbers were estimated from the same returns you would PCA, '
     'treat every figure on this page as optimistic (see [3]).</div>',
     unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ scorecard
+# One row per factor, in words, against the reader's own bands. This is the part
+# that travels into a slide, so it carries the consequence ("a hedge on it clears
+# 92% of the exposure") rather than the statistic that implies it.
+rows = []
+for j in range(k):
+    state, sentence = reporting.verdict(q(0.9, j), r["swap_rate"][j],
+                                        band_green, band_amber, TIE_TOL)
+    colour = STATE_COLORS[state]
+    rows.append(
+        f'<div style="display:flex;gap:.9rem;align-items:baseline;padding:.42rem .7rem;'
+        f'border-left:2px solid {colour};background:#141a21;margin-bottom:3px">'
+        f'<span style="color:{colour};min-width:5.4rem">f{j+1} &nbsp;{q(0.5, j):.0f}°'
+        f'<span style="opacity:.6;font-size:.78rem"> / {q(0.9, j):.0f}° at q90</span></span>'
+        f'<span style="color:#b6bfc9;font-size:.86rem">{sentence}</span></div>')
+st.markdown("".join(rows), unsafe_allow_html=True)
+st.caption(f"First angle is the median run, second is the 90th percentile. Bands "
+           f"({band_green:g}° / {band_amber:g}°) are yours, set in the sidebar — usability "
+           f"depends on what the direction is for, not on the angle alone.")
 
 # ------------------------------------------------------------------ fan chart
 rule("[1] error distribution")
@@ -357,6 +420,88 @@ st.markdown(
     "decomposition of the theorem."
     "</div>", unsafe_allow_html=True)
 
+# ---------------------------------------------------------------- shape of the fan
+# The bands above give five numbers per factor. The shape is a different fact: a
+# long right tail means the median understates what a bad run looks like, and no
+# quantile shows that on its own. Free to draw, the paths are already in hand.
+paths = r["paths"]["angle"]
+hfig = go.Figure()
+for j in range(k):
+    hfig.add_trace(go.Histogram(
+        x=[row[j] for row in paths], name=f"f{j+1}", nbinsx=60, opacity=0.55,
+        marker=dict(color=FACTOR_COLORS[j], line=dict(width=0)),
+        hovertemplate=f"<b>f{j+1}</b><br>%{{x:.0f}}°<br>%{{y}} runs<extra></extra>"))
+    hfig.add_vline(x=q(0.9, j), line=dict(color=FACTOR_COLORS[j], width=1, dash="dot"),
+                   opacity=.8)
+hfig.add_vline(x=reporting.RANDOM_BASELINE_DEG, line=dict(color="#6b7683", width=1),
+               annotation_text="a random direction", annotation_position="top left",
+               annotation_font=dict(size=10, color="#6b7683"))
+hfig.update_xaxes(range=[0, 92], dtick=15, title="angle between estimated and true direction (°)",
+                  title_font=dict(size=11), gridcolor="#161c23", showline=True,
+                  linecolor="#2c3641", tickfont=dict(size=11))
+hfig.update_yaxes(title="simulated runs", title_font=dict(size=11), gridcolor="#161c23",
+                  tickfont=dict(size=11))
+hfig.update_layout(template="plotly_dark", barmode="overlay", height=270,
+                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                   font=dict(family="JetBrains Mono, monospace", size=12, color="#b6bfc9"),
+                   margin=dict(l=48, r=8, t=8, b=8),
+                   legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)))
+st.plotly_chart(hfig, width="stretch")
+st.markdown(
+    '<div class="note">Every simulated run, not a summary of them. Dotted lines are each '
+    'factor&#39;s q90. Angles stay in degrees on purpose: rescaling to 0–1 would throw away the '
+    'only reference point a reader has, which is that <b>a direction picked at random lands at '
+    '90°</b>. A long right tail means the median is a poor description of a bad run.'
+    "</div>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------- distribution swap
+# How much of the answer rests on a choice nobody can verify from data. This is a
+# fragility measure, not another error measure: same calibration, same seed, one
+# assumption changed.
+if st.button("how much of this depends on the return distribution?", width="content"):
+    alt, other = run_alt_dist(p, n, k, tuple(a), float(d2), dist_key, reps, ENGINE_FINGERPRINT)
+    focus = max(range(k), key=lambda j: q(0.5, j))       # the weakest factor is the fragile one
+    label = {"t": "Student-t (6 df)", "normal": "Normal"}
+    dfig = go.Figure()
+    for res, key, colour in ((r, dist_key, FACTOR_COLORS[0]), (alt, other, "#d98a3a")):
+        dfig.add_trace(go.Histogram(
+            x=[row[focus] for row in res["paths"]["angle"]], nbinsx=60, opacity=0.55,
+            name=label[key], marker=dict(color=colour, line=dict(width=0)),
+            hovertemplate=f"{label[key]}<br>%{{x:.0f}}°<extra></extra>"))
+        dfig.add_vline(x=res["quantiles"]["0.9"][focus],
+                       line=dict(color=colour, width=1, dash="dot"), opacity=.85)
+    dfig.update_xaxes(range=[0, 92], dtick=15, title=f"f{focus+1} angle (°)",
+                      title_font=dict(size=11), gridcolor="#161c23", showline=True,
+                      linecolor="#2c3641", tickfont=dict(size=11))
+    dfig.update_yaxes(title="simulated runs", title_font=dict(size=11),
+                      gridcolor="#161c23", tickfont=dict(size=11))
+    dfig.update_layout(template="plotly_dark", barmode="overlay", height=260,
+                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                       font=dict(family="JetBrains Mono, monospace", size=12, color="#b6bfc9"),
+                       margin=dict(l=48, r=8, t=8, b=8),
+                       legend=dict(orientation="h", y=1.1, x=0, font=dict(size=11)))
+    st.plotly_chart(dfig, width="stretch")
+    here_q90, there_q90 = q(0.9, focus), alt["quantiles"]["0.9"][focus]
+    shift = abs(here_q90 - there_q90)
+    rel = shift / max(here_q90, 1e-9) * 100
+    # A bare "1.7°" invites the reader to assume it is large, because they have
+    # nothing to compare it to. State the reading. This cuts both ways: the same
+    # sentence has to be willing to call the tool fragile when it is.
+    read = ("so at this calibration the headline numbers are <b>not</b> very sensitive to that "
+            "choice" if rel < 10 else
+            "so a large share of the headline number is riding on that choice")
+    st.markdown(
+        f'<div class="note">Same p, n, k and calibration; only the factor-return law changes. '
+        f'f{focus+1} at q90 goes from <b>{here_q90:.1f}°</b> under {label[dist_key]} to '
+        f'<b>{there_q90:.1f}°</b> under {label[other]}, a shift of '
+        f'<b>{shift:.1f}°</b> ({rel:.0f}% of the angle), {read}. That gap is not error, '
+        f'it is <b>how much of '
+        'your answer rests on a distributional assumption you cannot check from the returns '
+        'themselves</b>. The floor formula is derived under Gaussian noise and is not '
+        're-derived for heavy tails, so on the Student-t side the fan moves and the asymptotic '
+        'tick does not.'
+        "</div>", unsafe_allow_html=True)
+
 # ------------------------------------------------------------------ quantile table + export
 rule("[2] readout")
 
@@ -366,6 +511,7 @@ df = pd.DataFrame([{
     "snr": round(snr_of(j), 1),
     "floor°": round(floor_of(j), 1),
     "asym°": round(r["floor_asymptotic"][j], 1),
+    "path°": round(r["floor_pathwise_median"][j], 1),
     "q50°": round(q(0.5, j), 1),
     "q80°": round(q(0.8, j), 1),
     "q90°": round(q(0.9, j), 1),
@@ -384,6 +530,13 @@ st.caption("q90lo/q90hi = a 95% bootstrap interval, swaplo/swaphi = a 95% Wilson
            "both for Monte Carlo estimation noise only, not uncertainty about whether the "
            "simulator describes real markets. A tie verdict decided by less than the swap "
            "interval is noise; raise the simulation count before trusting it.")
+st.caption("asym° evaluates the floor at the population strength vol²×prevalence, which is a "
+           "second (n → ∞) limit on top of the p → ∞ one, and reads optimistic for the weaker "
+           "factors at small n. path° evaluates the same formula at each path's realized ρⱼ and "
+           "is the theorem's own floor conditional on F. Assembled pathwise, floor + rotation "
+           f"lands on the simulated median: predicted "
+           f"{'/'.join(f'{v:.1f}' for v in r['total_predicted_median'])}° against measured "
+           f"{'/'.join(f'{q(0.5, j):.1f}' for j in range(k))}°.")
 
 # The tie warning sits directly under the rows it disqualifies, not below the
 # consequence text: a reader who stops at the table must still see it.
@@ -408,6 +561,39 @@ for run in ties:
         f'direction in it. The {tie_cutoff_pct:g}% switch is a display heuristic (adjustable in '
         f'the sidebar) and no span-level floor or required-history target is claimed — see '
         f'[5] methodology.'
+        "</div>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------- confusion heatmap
+# The swap% column collapses this matrix to its off-diagonal total. Drawn in full
+# it says WHICH factor a label leaks into, which the scalar cannot: a 6% swap rate
+# spread over two neighbours is a different problem from 6% into one of them.
+# Columns sum to 1 by construction (each is "where did h_j's best match land"),
+# so it is a set of distributions and is not symmetric. Reading it the other way
+# round is the mistake to avoid.
+if k > 1:
+    conf_m = r["confusion"]
+    hm = go.Figure(go.Heatmap(
+        z=[[conf_m[i][j] * 100 for j in range(k)] for i in range(k)],
+        x=[f"h{j+1} (estimated)" for j in range(k)],
+        y=[f"b{i+1} (true)" for i in range(k)],
+        text=[[f"{conf_m[i][j] * 100:.1f}%" for j in range(k)] for i in range(k)],
+        texttemplate="%{text}", textfont=dict(size=12),
+        colorscale=[[0, "#141a21"], [0.5, "#8a5a2a"], [1, "#5b91c9"]],
+        zmin=0, zmax=100, showscale=False,
+        hovertemplate="true %{y} matched to %{x}<br>%{z:.1f}% of runs<extra></extra>"))
+    hm.update_layout(template="plotly_dark", height=90 + 52 * k,
+                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                     font=dict(family="JetBrains Mono, monospace", size=11, color="#b6bfc9"),
+                     margin=dict(l=110, r=8, t=8, b=8))
+    hm.update_yaxes(autorange="reversed")
+    st.plotly_chart(hm, width="stretch")
+    st.markdown(
+        '<div class="note">Where each estimated direction&#39;s best match actually landed, over '
+        'all simulated runs. <b>Each column is a distribution and sums to 100%</b>, so the matrix '
+        'is deliberately not symmetric — read it column by column, never as a similarity table. '
+        'The diagonal is how often the estimator recovered the factor it was aiming at; the '
+        'off-diagonal mass in a column is exactly that factor&#39;s swap%, broken out by where '
+        'the label went. Matching uses the true directions, which no practitioner has.'
         "</div>", unsafe_allow_html=True)
 
 st.markdown(
@@ -702,6 +888,91 @@ if go_sweep:
            "treat a crossing as a threshold, not a precise n.")
         + "</div>", unsafe_allow_html=True)
 
+# ------------------------------------------------------------------ the other budget: p
+# Sits inside [4] on purpose. Both questions are "how do I buy a better estimate",
+# and the honest answer is that one of the two currencies does not spend: n moves
+# the curve, p does not. Cheap to run because the dual-Gram construction is
+# O(n^3) and independent of p, so every point on this grid costs what the main
+# fan costs, unlike the n sweep where the last point dominates.
+P_GRID = [100, 300, 1000, 3000, 10_000, 30_000, 100_000]
+
+
+@st.cache_data(show_spinner=False)
+def run_p_sweep(n, k, a, d2, dist, engine_fp, reps=SWEEP_REPS):
+    bar = st.progress(0.0, "sweeping assets…")
+    sw = engine.sweep_p(
+        P_GRID, n, k, list(a), d2, dist, 6, reps,
+        on_point=lambda done, total, pp: bar.progress(done / total, f"sweeping… p={pp:,}"),
+        keep_paths=25)
+    bar.empty()
+    return sw
+
+
+st.markdown('<div style="height:.9rem"></div>', unsafe_allow_html=True)
+if st.button("and would more assets help?", width="content"):
+    psw = run_p_sweep(n, k, tuple(a), float(d2), dist_key, ENGINE_FINGERPRINT)
+    pfig = go.Figure()
+    for j in range(k):
+        # Individual runs as points, never joined: each grid point is its own
+        # simulate() call and the Wishart block consumes a different number of
+        # variates at each p, so there is no path that continues across the axis.
+        # A line here would draw a continuity the simulation does not have.
+        pfig.add_trace(go.Scatter(
+            x=[pp for pp in P_GRID for _ in psw["paths"][0]],
+            y=[row[j] for pt in psw["paths"] for row in pt], mode="markers",
+            marker=dict(color=FACTOR_COLORS[j], size=3, opacity=0.18), showlegend=False,
+            hoverinfo="skip"))
+        pfig.add_trace(go.Scatter(
+            x=P_GRID + P_GRID[::-1],
+            y=[row[j] for row in psw["q90"]] + [row[j] for row in psw["q10"][::-1]],
+            fill="toself", fillcolor=FACTOR_COLORS[j], opacity=0.10, mode="none",
+            showlegend=False, hoverinfo="skip"))
+        pfig.add_trace(go.Scatter(
+            x=P_GRID, y=[row[j] for row in psw["q50"]], mode="lines+markers",
+            line=dict(color=FACTOR_COLORS[j], width=2), marker=dict(size=5),
+            name=f"f{j+1}",
+            hovertemplate=f"<b>f{j+1}</b><br>p=%{{x:,}}<br>median %{{y:.1f}}°<extra></extra>"))
+        pfig.add_hline(y=psw["floor"][j], line=dict(color=FACTOR_COLORS[j], width=1, dash="dash"),
+                       opacity=.55)
+    pfig.add_vline(x=p, line=dict(color="#6b7683", width=1, dash="dot"),
+                   annotation_text="your p", annotation_font=dict(size=11, color="#6b7683"))
+    # dtick=1 on a log axis is one tick per decade; the default adds 2x and 5x
+    # minor labels that just clutter a seven-point grid
+    pfig.update_xaxes(type="log", dtick=1, title="assets p (log scale), n held fixed",
+                      title_font=dict(size=11), gridcolor="#161c23", showline=True,
+                      linecolor="#2c3641", tickfont=dict(size=11))
+    pfig.update_yaxes(range=[0, 90], dtick=15, title="angle (°)", title_font=dict(size=11),
+                      gridcolor="#161c23", tickfont=dict(size=11))
+    pfig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                       plot_bgcolor="rgba(0,0,0,0)", height=330,
+                       font=dict(family="JetBrains Mono, monospace", size=12, color="#b6bfc9"),
+                       margin=dict(l=48, r=8, t=8, b=8),
+                       legend=dict(orientation="h", y=-0.28, font=dict(size=11)))
+    st.plotly_chart(pfig, width="stretch")
+    # Measured from where the reader actually stands, not from the left edge of
+    # the grid. The small-p end is still climbing out of the pre-asymptotic
+    # regime, so quoting p=100 -> p=100,000 would report a large drop and read as
+    # evidence AGAINST the panel's own point. The decision on the table is
+    # "should I expand the universe I already have", so that is the comparison.
+    here = next((i for i, pp in enumerate(P_GRID) if pp >= p), len(P_GRID) - 1)
+    first, last = psw["q50"][here], psw["q50"][-1]
+    st.markdown(
+        '<div class="note">Solid is the median run, the shaded band is q10–q90, dashed is the '
+        'floor, and the faint points are 25 individual runs at each grid point. They are drawn '
+        '<b>unjoined on purpose</b>: each p is its own independent simulation, so no single run '
+        'continues across the axis. '
+        f'Going from your p = {p:,} to p = {P_GRID[-1]:,} '
+        f'({P_GRID[-1] / max(p, 1):.0f}× the universe) moves the median by '
+        + ", ".join(f'<b>{first[j] - last[j]:+.1f}°</b> on f{j+1}' for j in range(k))
+        + ". The curves flatten onto the floor and stay there, because the floor is a "
+          "p → ∞ statement at fixed n: it is set by n and the signal-to-noise ratio, and "
+          "buying more assets does not buy any of either. What moves it is more history "
+          "(the sweep above) or a stronger factor."
+          "<br>The left of the grid is still climbing out of the pre-asymptotic regime, so "
+          "the drop visible there is the asymptotics arriving, <b>not</b> a return on adding "
+          "assets. Read the flat right-hand stretch, which is where any real universe sits."
+          "</div>", unsafe_allow_html=True)
+
 # ------------------------------------------------------------------ methodology
 rule("[5] methodology & assumptions")
 
@@ -761,7 +1032,8 @@ remain future work.
 | sin²∠(hⱼ, bⱼ) per path | **exact finite-p draw** — no asymptotic shortcut |
 | floor tick, spectrum mode | exact arithmetic on your eigenvalues (its own sampling noise is **not** shown) |
 | floor tick, model mode | median of the simulated plug-in ℓ/θⱼ — an asymptotic floor, not a pathwise finite-p bound |
-| gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Selecting Student-t factor returns changes the simulated fan only — **the formula is not re-derived for heavy tails**, which is why it is a reference tick and not a bound |
+| gray asymptotic tick (`asym°`) | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Selecting Student-t factor returns changes the simulated fan only — **the formula is not re-derived for heavy tails**, which is why it is a reference tick and not a bound. Evaluated at the *population* strength λ = vol²×prevalence, a second (n → ∞) limit on top of the p → ∞ one |
+| pathwise floor (`path°`) | the same formula at each path's *realized* ρⱼ (the eigenvalues of D̂ = C^½(FᵀF/n)C^½), then medianed. The theorem conditions on F, so ρⱼ is random and this is the floor it names; `asym°` silently substitutes its n → ∞ limit. They separate at small n because D̂'s eigenvalues spread, and **`asym°` is the optimistic one for the weaker factors** |
 | fan quantiles | empirical quantiles of simulated paths; q90 includes a 95% bootstrap interval for Monte Carlo estimation noise |
 
 Per path: Y = U·diag(√(pλ))·Φ + Z. The n×n dual Gram is simulated exactly without ever forming a
@@ -792,6 +1064,13 @@ bands than below them.**
 Cross-checked against a full p-dimensional reference engine (agreement <0.5° at p=500 and p=3000)
 and against the paper's Figure 1; floors reproduce the closed form; simulated totals sit above the
 floor as the theorem requires. The footer re-runs the reference check live on the paper calibration.
+
+**Decomposition check.** The engine assembles the theorem pathwise — floor + (1−floor)·sin²∠(ŵⱼ, eⱼ)
+at each path's own ρⱼ — and the median of that lands on the separately simulated median total. At the
+default calibration the two agree to 0.1–0.25°, against 0.5–3.3° for the same prediction built on the
+population strength λ. That checks equation (5) *inside* the simulator rather than one implementation
+against another, and it is asserted in the engine self-check so it cannot rot. It is one calibration:
+the gap widens as n falls and D̂'s eigenvalues spread, and that has not been swept.
 
 **External validity is not established.** The true loading direction is latent, so "realized
 rotation" cannot be observed directly on real equity panels; cross-window sample rotation also
