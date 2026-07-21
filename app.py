@@ -46,8 +46,13 @@ st.markdown("""
   [data-testid="stHeader"] { background: transparent; }
   .block-container { padding-top: 4rem; padding-bottom: 4rem; max-width: 1180px; }
 
-  /* type-in fields, not spinner widgets */
+  /* type-in fields, not spinner widgets: p and n are four-digit numbers nobody
+     wants to click up to. k is the exception — it is a single digit with a range
+     of 8, so hiding its steppers left no visible way to change it at all and the
+     cap read as lower than it is. */
   [data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] { display: none; }
+  .st-key-k_factors [data-testid="stNumberInputStepUp"],
+  .st-key-k_factors [data-testid="stNumberInputStepDown"] { display: flex; }
   [data-testid="stSidebar"] label p { font-size: .78rem; opacity: .7; letter-spacing: .04em; }
   [data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
@@ -144,7 +149,12 @@ with st.sidebar:
     # factors the weak ones sit near the noise floor and swap labels constantly,
     # which the scorecard will tell you.
     k = int(st.number_input("k · factors", min_value=1,
-                            max_value=min(calibration.MAX_K, len(FACTOR_COLORS)), value=3))
+                            max_value=min(calibration.MAX_K, len(FACTOR_COLORS)), value=3,
+                            key="k_factors",
+                            help=f"Up to {min(calibration.MAX_K, len(FACTOR_COLORS))}. "
+                                 "Past 4 the defaults are extrapolated, and past 5 or 6 the weak "
+                                 "factors swap labels so often that the scorecard stops naming "
+                                 "them."))
     dist = st.selectbox("factor return distribution", ["Student-t (6 df)", "Normal"])
     reps = int(st.select_slider("simulations", options=[200, 400, 1000, 2000], value=400))
     tie_cutoff_pct = st.number_input(
