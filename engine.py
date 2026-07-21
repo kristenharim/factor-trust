@@ -129,12 +129,19 @@ def _q90_mc_interval(angles, seed, bootstrap_reps=MC_BOOTSTRAP_REPS):
     }
 
 
-def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
-    """Monte Carlo the finite-p error. a = per-factor signal strengths (k,)."""
+def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED, return_paths=False):
+    """Monte Carlo the finite-p error. a = per-factor signal strengths (k,).
+
+    return_paths keeps the per-path angle and plug-in arrays instead of only
+    their quantiles, for callers that need the raw distribution (histograms,
+    paired violins, any bootstrap the engine does not already do).
+    """
     a = validate_calibration(p, n, k, a, d2, reps)
     rng = np.random.default_rng(seed)
     sin2 = np.empty((reps, k))
     obs = np.empty((reps, k))
+    rot = np.empty((reps, k))          # sin2 angle(w_hat_j, e_j), the rotation term
+    rho = np.empty((reps, k))          # realized eigenvalues of D_hat, the theorem's rho_j
     swaps = np.zeros(k)
     conf = np.zeros((k, k))            # conf[i, j] = times h_j's best match was b_i
     gs = groups(k)
@@ -143,8 +150,19 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
     scale = np.sqrt(p * a)[:, None]
     sd = np.sqrt(d2)
     for r in range(reps):
-        SE = scale * _phi(rng, k, n, dist, dof) + sd * rng.standard_normal((k, n))
+        # S is kept separate from S+E because D_hat is built from the factor part
+        # alone. Same two draws in the same order as before, so the master stream
+        # is unchanged and every previously published number still reproduces.
+        S_only = scale * _phi(rng, k, n, dist, dof)
+        SE = S_only + sd * rng.standard_normal((k, n))
         M = SE.T @ SE + _wishart(rng, n, p - k, d2)
+        # D_hat = C^(1/2) (F'F/n) C^(1/2) is exactly S S' / (n p) here, so its
+        # eigenvalues ARE rho_j and its eigenvectors are w_hat_j. The p divides
+        # out of the eigenvectors (it scales every eigenvalue equally), which is
+        # why the rotation term does not depend on p at all.
+        rvals, W_d = np.linalg.eigh(S_only @ S_only.T / (n * p))
+        rho[r] = rvals[::-1]
+        rot[r] = np.clip(1.0 - np.diag(W_d[:, ::-1]) ** 2, 0.0, 1.0)
         tv, W = _top_k(M, k, n)
         # G[i, j] = <b_i, h_j>, signed. Keep the sign: |.| is right for a single
         # direction (eigenvector sign is arbitrary) but destroys the subspace
@@ -171,11 +189,24 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
     deg = lambda s2: np.degrees(np.arcsin(np.sqrt(np.clip(s2, 0, 1))))
     ang = deg(sin2)
     sub_deg = np.degrees(subang)
-    return {
+    # Theorem (5) assembled pathwise: the floor is evaluated at each path's own
+    # realized rho_j, not at the population strength a. Those differ at finite n
+    # because D_hat's eigenvalues spread, and substituting a is a second (n -> inf)
+    # limit on top of the p -> inf one. Assembling per path and taking one median
+    # at the end is the element-wise comparison; medians of the two terms taken
+    # separately do not add.
+    floor_path = d2 / (n * rho + d2)
+    pred_path = floor_path + (1.0 - floor_path) * rot
+    out = {
         "quantiles": {str(q): np.quantile(ang, q, axis=0).round(2).tolist() for q in QS},
         "mean": ang.mean(axis=0).round(2).tolist(),
         "floor_plugin_median": deg(np.median(obs, axis=0)).round(2).tolist(),
         "floor_asymptotic": deg(d2 / (n * a + d2)).round(2).tolist(),
+        # the same floor evaluated at realized rho instead of population a
+        "floor_pathwise_median": deg(np.median(floor_path, axis=0)).round(2).tolist(),
+        "rotation_median": np.median(rot, axis=0).round(4).tolist(),
+        # median of the assembled theorem prediction; compare against quantiles 0.5
+        "total_predicted_median": deg(np.median(pred_path, axis=0)).round(2).tolist(),
         "snr": (n * a / d2).round(2).tolist(),
         "q90_mc95": _q90_mc_interval(ang, seed),
         "swap_rate": (swaps / reps).round(4).tolist(),
@@ -188,6 +219,9 @@ def simulate(p, n, k, a, d2, dist="t", dof=6, reps=400, seed=SEED):
         } for g, S in enumerate(gs)},
         "reps": reps, "p": p, "n": n, "k": k, "dist": dist, "dof": dof, "seed": seed,
     }
+    if return_paths:
+        out["paths"] = {"angle": ang.tolist(), "plugin_floor": deg(obs).tolist()}
+    return out
 
 
 def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=None):
@@ -207,6 +241,44 @@ def sweep_n(p, n_grid, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=
         if on_point:
             on_point(i + 1, len(out["n"]), int(n))
     return out
+
+
+def sweep_p(p_grid, n, k, a, d2, dist="t", dof=6, reps=250, seed=SEED, on_point=None,
+            keep_paths=0):
+    """q10/q50/q90 total-error angle per factor across asset counts, n held fixed.
+
+    The point of the sweep is that the curves flatten: the floor is a p -> inf,
+    fixed-n statement, so growing p buys nothing once the curve has settled. Cheap
+    to run because the dual-Gram construction is O(n^3) and independent of p, so
+    p = 100,000 costs exactly what p = 100 costs — unlike sweep_n, every grid point
+    here takes the same time.
+
+    keep_paths keeps that many individual path angles per grid point, for drawing
+    the spread behind the quantiles. They are NOT a path followed across p: each
+    grid point is its own simulate() call and the Wishart block consumes a
+    different number of variates at each p, so the streams diverge immediately.
+    Draw them as points, never joined up, or the picture claims a continuity the
+    simulation does not have.
+    """
+    out = {"p": list(p_grid), "q10": [], "q50": [], "q90": [], "paths": [],
+           "floor": deg_of(d2 / (n * np.asarray(a, dtype=float) + d2))}
+    for i, pp in enumerate(out["p"]):
+        r = simulate(int(pp), n, k, a, d2, dist, dof, reps, seed,
+                     return_paths=bool(keep_paths))
+        out["q10"].append(r["quantiles"]["0.1"])
+        out["q50"].append(r["quantiles"]["0.5"])
+        out["q90"].append(r["quantiles"]["0.9"])
+        if keep_paths:
+            out["paths"].append(r["paths"]["angle"][:keep_paths])
+        if on_point:
+            on_point(i + 1, len(out["p"]), int(pp))
+    return out
+
+
+def deg_of(sin2_values):
+    """sin2 -> degrees, as a plain list. The engine speaks degrees on the way out."""
+    s = np.clip(np.asarray(sin2_values, dtype=float), 0.0, 1.0)
+    return np.degrees(np.arcsin(np.sqrt(s))).round(2).tolist()
 
 
 def from_spectrum(eigs, n, k, bulk_mean=None, bulk_count=None):
@@ -315,5 +387,44 @@ if __name__ == "__main__":
                  on_point=lambda done, total, nn: seen.append((done, total, nn)))
     assert seen == [(1, 2, 10), (2, 2, 12)], seen
     assert sw["n"] == [10, 12] and len(sw["q90"]) == 2, sw["n"]
+
+    # --- theorem (5), assembled pathwise ------------------------------------
+    # The decomposition is the whole result, so check it rather than assume it:
+    # floor + (1-floor)*rotation, built per path from D_hat, must land on the
+    # separately-simulated total. Both are medians of the same 800 paths.
+    meas = np.array(r["quantiles"]["0.5"])
+    pred = np.array(r["total_predicted_median"])
+    assert np.all(np.abs(meas - pred) < 1.0), (meas, pred)
+    # ...and it must beat the same prediction with the population strength a
+    # substituted for realized rho, which is the extra n -> inf limit. If this
+    # ever fails, the pathwise floor has stopped being the better tick and the
+    # readout column claiming so is wrong.
+    fa = 0.16 / (63 * np.array(a) + 0.16)
+    pop = np.degrees(np.arcsin(np.sqrt(fa + (1 - fa) * np.array(r["rotation_median"]))))
+    assert np.all(np.abs(meas - pred) <= np.abs(meas - pop)), (meas, pred, pop)
+
+    # raw paths are opt-in and shaped (reps, k)
+    rp = simulate(500, 20, 2, a[:2], 0.16, "normal", reps=7, return_paths=True)
+    assert "paths" not in simulate(500, 20, 2, a[:2], 0.16, "normal", reps=7)
+    assert np.array(rp["paths"]["angle"]).shape == (7, 2), rp["paths"]["angle"]
+    assert np.array(rp["paths"]["plugin_floor"]).shape == (7, 2)
+    # 0.005 not 0 because the quantiles ship rounded to 2dp and the paths do not
+    assert abs(np.median(rp["paths"]["angle"], axis=0)[0]
+               - rp["quantiles"]["0.5"][0]) < 5e-3, "paths must match the quantiles"
+
+    # sweep_p: same callback contract as sweep_n, and the floor does not move with p
+    seen_p = []
+    swp = sweep_p([300, 30_000], 63, 2, a[:2], 0.16, "normal", reps=40,
+                  on_point=lambda done, total, pp: seen_p.append((done, total, pp)),
+                  keep_paths=6)
+    assert seen_p == [(1, 2, 300), (2, 2, 30_000)], seen_p
+    assert swp["p"] == [300, 30_000] and len(swp["floor"]) == 2, swp
+    # a hundredfold more assets must not move the curve by much once it has settled
+    assert abs(swp["q50"][0][0] - swp["q50"][1][0]) < 3.0, swp["q50"]
+    # the band must actually bracket the median at every grid point
+    for lo, mid, hi in zip(swp["q10"], swp["q50"], swp["q90"]):
+        assert all(l <= m <= h for l, m, h in zip(lo, mid, hi)), (lo, mid, hi)
+    assert np.array(swp["paths"]).shape == (2, 6, 2), np.array(swp["paths"]).shape
+    assert not sweep_p([300], 63, 2, a[:2], 0.16, "normal", reps=5)["paths"]
     print("engine self-check OK:", r["quantiles"]["0.5"], r["quantiles"]["0.9"],
           "swap:", r["swap_rate"])

@@ -44,7 +44,8 @@ in a way the fan cannot show.
 | sin²∠(hⱼ, bⱼ) per path | exact finite-p draw, no asymptotic shortcut |
 | floor tick, spectrum mode | exact arithmetic on your eigenvalues (its own sampling noise is **not** shown) |
 | floor tick, model mode | median of the simulated plug-in ℓ/θⱼ, an asymptotic floor, not a pathwise finite-p bound |
-| gray asymptotic tick | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Student-t factor returns change the simulated fan only; the formula is not re-derived for heavy tails |
+| gray asymptotic tick (`asym°`) | closed-form limit arcsin√(δ²/(nλⱼ+δ²)) in the **p → ∞, n fixed** regime, derived under the model's own assumptions (in particular Gaussian idiosyncratic noise). Student-t factor returns change the simulated fan only; the formula is not re-derived for heavy tails. Evaluated at the *population* strength λ = vol²×prevalence, which is a second (n → ∞) limit on top of the p → ∞ one — see `path°` |
+| pathwise floor (`path°`) | the same formula evaluated at each path's *realized* ρⱼ, the eigenvalues of D̂ = C^(1/2)(FᵀF/n)C^(1/2), then medianed. The theorem conditions on F, so ρⱼ is a random variable and this is the floor it actually names; `asym°` substitutes its n → ∞ limit. They separate at small n because D̂'s eigenvalues spread, and `asym°` reads optimistic for the weaker factors |
 | fan quantiles | empirical quantiles of simulated paths; q90 carries a 95% bootstrap interval for Monte Carlo estimation noise |
 | swap% | Monte Carlo rate with a 95% Wilson interval; both intervals quantify simulation noise only |
 
@@ -105,9 +106,19 @@ above the bands than below them.
 
 Cross-checked against a full p-dimensional reference engine (agreement <0.5° at p=500 and
 p=3000) and against the paper's Figure 1; floors reproduce the closed form; simulated
-totals sit above the floor as the theorem requires. Agreement between two engines is
-implementation validation, not theorem validation, and **external validity is not
-established**: the true loading direction is latent, so realized rotation cannot be
+totals sit above the floor as the theorem requires.
+
+**Decomposition check.** The engine also assembles the theorem pathwise: per path it forms
+floor + (1−floor)·sin²∠(ŵⱼ, eⱼ) at that path's realized ρⱼ, and the median of that lands on
+the separately-simulated median total. At the default calibration (p=3000, n=63, k=3, t(6),
+2000 paths) the two agree to 0.1–0.25°, against 0.5–3.3° for the same prediction built on the
+population strength λ instead of realized ρ. That is a check of equation (5) inside the
+simulator, not merely of one implementation against another, and it is asserted in
+`engine.py`'s self-check so it cannot rot. It is one calibration; the discrepancy grows as n
+falls and D̂'s eigenvalues spread further, and it has not been swept.
+
+Agreement between two engines is implementation validation, not theorem validation, and
+**external validity is not established**: the true loading direction is latent, so realized rotation cannot be
 observed on real equity panels. Every number is internally consistent and externally
 unproven.
 
