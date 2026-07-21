@@ -34,8 +34,13 @@ st.set_page_config(page_title="factor-trust", layout="wide")
 # hairline borders). This only covers what the theme system can't reach.
 st.markdown("""
 <style>
+  /* Hide the chrome piece by piece, NOT the whole toolbar: stToolbar also
+     contains stExpandSidebarButton, the only control that reopens a collapsed
+     sidebar. Hiding the parent made collapsing the sidebar a one-way door that
+     only a page reload undid. */
   #MainMenu, footer, [data-testid="stDecoration"],
-  [data-testid="stToolbar"], [data-testid="stAppDeployButton"] { display: none; }
+  [data-testid="stAppDeployButton"] { display: none; }
+  [data-testid="stToolbar"] { background: transparent; }
   /* stHeader is a 48.75px opaque bar at z-index 999990: it paints over the top of
      the page, so content must clear it and it must not show as a band. */
   [data-testid="stHeader"] { background: transparent; }
